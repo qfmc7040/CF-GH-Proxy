@@ -12,6 +12,10 @@ const GITHUB_PATTERNS = [
     /^(?:https?:\/\/)?raw\.(?:githubusercontent|github)\.com\/.+?\/.+?\/.+?\/.+$/i,
     /^(?:https?:\/\/)?gist\.(?:githubusercontent|github)\.com\/.+?\/.+?\/.+$/i,
     /^(?:https?:\/\/)?api\.github\.com\/.*$/i,
+    /^(?:https?:\/\/)?codeload\.github\.com\/.+?\/.+?\/(?:tar\.gz|zip|legacy\..*)$/i,
+    /^(?:https?:\/\/)?objects\.githubusercontent\.com\/.*$/i,
+    /^(?:https?:\/\/)?github\.githubassets\.com\/.*$/i,
+    /^(?:https?:\/\/)?(?:copilot|actions)\.githubusercontent\.com\/.*$/i,
 ]
 
 const CORS_HEADERS = {
@@ -49,10 +53,18 @@ async function fetchHandler(e) {
     const req = e.request
     const urlObj = new URL(req.url)
 
-    let path = urlObj.searchParams.get('q')
-    if (path) {
-        return Response.redirect('https://' + urlObj.host + CONFIG.PREFIX + path, 301)
+let path = urlObj.searchParams.get('q')
+if (path) {
+    const normalizedPath = path.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
+    
+    if (GITHUB_PATTERNS.some(p => p.test(normalizedPath))) {
+        return Response.redirect(
+            'https://' + urlObj.host + CONFIG.PREFIX + normalizedPath, 
+            301
+        )
     }
+    return makeRes('Blocked: Invalid redirect target. Only GitHub URLs are allowed.', 400)
+}
 
     let rawPath = urlObj.pathname
     if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) {
@@ -168,29 +180,58 @@ async function fetchHandler(e) {
         });
     }
 
-    if (GITHUB_PATTERNS.some(p => p.test(path))) {
-        return proxyRequest(e, req, path)
-    } else {
-        return fetch(CONFIG.ASSET_URL + path)
-    }
+if (GITHUB_PATTERNS.some(p => p.test(path))) {
+    return proxyRequest(e, req, path)
+} else {
+    return makeRes(
+        JSON.stringify({ 
+            error: 'Not Found', 
+            message: 'Only GitHub URLs are supported. Please check your input.',
+            supported_patterns: GITHUB_PATTERNS.map(p => p.toString())
+        }), 
+        404, 
+        { 'content-type': 'application/json; charset=utf-8' }
+    )
+}
 }
 
 async function proxyRequest(e, req, pathname) {
-    if (req.method === 'OPTIONS' && req.headers.has('access-control-request-headers')) {
-        return PREFLIGHT_RESP
-    }
 
-    if (CONFIG.WHITE_LIST.length > 0) {
-        const isAllowed = CONFIG.WHITE_LIST.some(i => pathname.includes(i))
-        if (!isAllowed) return new Response("blocked", { status: 403 })
+    const cacheKeyUrl = new URL(pathname.startsWith('http') ? pathname : `https://${pathname}`)
+    const STABLE_PARAMS = ['ref', 'tag', 'branch', 'commit']
+    for (const key of [...cacheKeyUrl.searchParams.keys()]) {
+        if (!STABLE_PARAMS.includes(key)) {
+            cacheKeyUrl.searchParams.delete(key)
+        }
     }
-
-    const cacheKey = new Request(pathname, { method: 'GET' })
+    const cacheKey = new Request(cacheKeyUrl.href, { method: 'GET' })
     const cache = caches.default
 
     if (req.method === 'GET') {
         const cached = await cache.match(cacheKey)
-        if (cached) return cached
+        if (cached) {
+            const clientEtag = req.headers.get('if-none-match')
+            const clientLastModified = req.headers.get('if-modified-since')
+            const cachedEtag = cached.headers.get('etag')
+            const cachedLastModified = cached.headers.get('last-modified')
+
+            if ((clientEtag && clientEtag === cachedEtag) || 
+                (clientLastModified && clientLastModified === cachedLastModified)) {
+                return new Response(null, {
+                    status: 304,
+                    headers: { 
+                        ...CORS_HEADERS,
+                        'etag': cachedEtag || '',
+                        'last-modified': cachedLastModified || '',
+                        'x-cache-status': 'HIT-304'
+                    }
+                })
+            }
+
+            const hitHeaders = new Headers(cached.headers)
+            hitHeaders.set('x-cache-status', 'HIT')
+            return new Response(cached.body, { status: cached.status, headers: hitHeaders })
+        }
     }
 
     const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
@@ -211,16 +252,22 @@ async function proxyRequest(e, req, pathname) {
     const response = await handleProxyFetch(urlObj, init, 0)
 
     if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
+        const cacheHeaders = new Headers(response.headers)
+        cacheHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
+        cacheHeaders.set('x-cache-status', 'MISS')
+
         const cachedResponse = new Response(response.body, {
             status: response.status,
-            headers: new Headers(response.headers)
+            headers: cacheHeaders
         })
-        cachedResponse.headers.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
+
         e.waitUntil(cache.put(cacheKey, cachedResponse.clone()))
         return cachedResponse
     }
 
-    return response
+    const missHeaders = new Headers(response.headers)
+    missHeaders.set('x-cache-status', 'BYPASS')
+    return new Response(response.body, { status: response.status, headers: missHeaders })
 }
 
 async function handleProxyFetch(urlObj, init, redirectCount) {
