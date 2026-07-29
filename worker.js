@@ -1,9 +1,7 @@
 'use strict'
 
 const CONFIG = {
-    ASSET_URL: 'https://geekertao.github.io/gh-proxy/',
     PREFIX: '/',
-    JSDELIVR: false,
     WHITE_LIST: [],
     CACHE_TTL: 86400,
 }
@@ -152,7 +150,7 @@ async function fetchHandler(e) {
             <p>🖨️ gist：https://gist.githubusercontent.com/xxxxxx/123/raw/cmd.py</p>
             <p>☁️ api： https://api.github.com/repos/xxxxxx/CF-Workers-GitHub-Proxy</p>
         </div>
-            <p><a href="https://github.com/qfmc7040/CF-GitHub-Proxy/">QFMC</a> 访问以参考项目</p>
+            <p><a href="https://github.com/qfmc7040/CF-GH-Proxy/">QFMC</a> 访问以参考项目</p>
     </div>
     <script>
         function toSubmit(e) {
