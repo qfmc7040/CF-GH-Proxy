@@ -4,7 +4,7 @@ const CONFIG = {
     PREFIX: '/',
     WHITE_LIST: [],
     CACHE_TTL: 86400,
-    MAX_CACHE_SIZE: 50 * 1024 * 1024,
+    MAX_CACHE_SIZE: 50 * 1024 * 1024, // 50MB
     RATE_LIMIT_WINDOW: 30,
     RATE_LIMIT_MAX: 50,
     IS_PRODUCTION: true,
@@ -283,10 +283,18 @@ async function proxyRequest(e, req, pathname) {
     const reqHdrNew = new Headers(req.headers)
     reqHdrNew.delete('cookie')
     reqHdrNew.delete('authorization')
+    reqHdrNew.delete('host') 
 
     const response = await handleProxyFetch(urlObj, {
         method: req.method, headers: reqHdrNew, redirect: 'manual', body: req.body
     }, 0)
+
+    if (!response.ok && response.status !== 304) {
+         const errorHeaders = new Headers(response.headers)
+         for (const [k, v] of Object.entries(dynamicCors)) errorHeaders.set(k, v)
+         for (const [k, v] of Object.entries(SECURITY_HEADERS)) errorHeaders.set(k, v)
+         return new Response(response.body, { status: response.status, headers: errorHeaders })
+    }
 
     if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
         const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
@@ -305,9 +313,48 @@ async function proxyRequest(e, req, pathname) {
         for (const [k, v] of Object.entries(dynamicCors)) cacheHeaders.set(k, v)
         for (const [k, v] of Object.entries(SECURITY_HEADERS)) cacheHeaders.set(k, v)
 
-        const cachedResponse = new Response(response.body, { status: response.status, headers: cacheHeaders })
+        const cachedResponse = new Response(response.body, { 
+            status: response.status, 
+            headers: cacheHeaders 
+        })
+        
         e.waitUntil(cache.put(cacheKey, cachedResponse.clone()))
-        return cachedResponse
+    }
+    
+    
+    
+    if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
+         const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
+         
+         if (contentLength > CONFIG.MAX_CACHE_SIZE) {
+             const bypassHeaders = new Headers(response.headers)
+             bypassHeaders.set('x-cache-status', 'BYPASS-LARGE')
+             for (const [k, v] of Object.entries(dynamicCors)) bypassHeaders.set(k, v)
+             for (const [k, v] of Object.entries(SECURITY_HEADERS)) bypassHeaders.set(k, v)
+             return new Response(response.body, { status: response.status, headers: bypassHeaders })
+         }
+
+         const responseClone = response.clone()
+         
+         const cacheHeaders = new Headers(response.headers)
+         cacheHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
+         cacheHeaders.set('x-cache-status', 'MISS')
+         for (const [k, v] of Object.entries(dynamicCors)) cacheHeaders.set(k, v)
+         for (const [k, v] of Object.entries(SECURITY_HEADERS)) cacheHeaders.set(k, v)
+
+         const cachedResponse = new Response(responseClone.body, { 
+             status: responseClone.status, 
+             headers: cacheHeaders 
+         })
+         
+         e.waitUntil(cache.put(cacheKey, cachedResponse))
+         
+         const finalHeaders = new Headers(response.headers)
+         finalHeaders.set('x-cache-status', 'MISS')
+         for (const [k, v] of Object.entries(dynamicCors)) finalHeaders.set(k, v)
+         for (const [k, v] of Object.entries(SECURITY_HEADERS)) finalHeaders.set(k, v)
+         
+         return new Response(response.body, { status: response.status, headers: finalHeaders })
     }
 
     const missHeaders = new Headers(response.headers)
@@ -321,28 +368,39 @@ async function handleProxyFetch(urlObj, init, redirectCount) {
     if (redirectCount > 5) return makeRes('Too many redirects', 508)
     try {
         const res = await fetch(urlObj.href, init)
+        
         if ([301, 302, 303, 307, 308].includes(res.status)) {
             const location = res.headers.get('location')
             if (!location) return res
+            
+            
             const nextUrl = new URL(location, urlObj.href)
+            
             if (GITHUB_PATTERNS.some(p => p.test(nextUrl.href))) {
-                return new Response(null, {
+                return handleProxyFetch(nextUrl, init, redirectCount + 1)
+            } else {
+                 return new Response(null, {
                     status: res.status,
                     headers: {
                         ...Object.fromEntries(res.headers),
-                        location: CONFIG.PREFIX + nextUrl.href,
                         'access-control-expose-headers': '*',
                         ...SECURITY_HEADERS,
                     }
                 })
             }
-            return handleProxyFetch(nextUrl, init, redirectCount + 1)
         }
+
         const resHdrNew = new Headers(res.headers)
+        
         resHdrNew.delete('content-security-policy')
         resHdrNew.delete('clear-site-data')
         resHdrNew.delete('x-frame-options')
-        return new Response(res.body, { status: res.status, headers: { ...resHdrNew, ...CORS_HEADERS, ...SECURITY_HEADERS } })
+        
+        
+        return new Response(res.body, { 
+            status: res.status, 
+            headers: resHdrNew 
+        })
     } catch (err) {
         return makeRes('Proxy Error: ' + err.message, 502)
     }
