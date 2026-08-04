@@ -1,7 +1,8 @@
 'use strict'
 
 const CONFIG = {
-    PREFIX: '/proxy/',
+    PREFIX: '/',
+    WHITE_LIST: [],
     CACHE_TTL: 86400,
 }
 
@@ -38,31 +39,9 @@ function makeRes(body, status = 200, headers = {}) {
 function newUrl(urlStr) {
     try {
         return new URL(urlStr)
-    } catch {
+    } catch (err) {
         return null
     }
-}
-
-function normalizeCacheUrl(urlStr) {
-    try {
-        const u = new URL(urlStr)
-        u.hostname = u.hostname.toLowerCase()
-        u.pathname = u.pathname.replace(/\/+/g, '/')
-        u.searchParams.sort()
-        return u.href
-    } catch {
-        return urlStr
-    }
-}
-
-function isValidGitHubUrl(urlStr) {
-    return GITHUB_PATTERNS.some(p => p.test(urlStr))
-}
-
-function normalizePrefix(prefix) {
-    if (!prefix.startsWith('/')) prefix = '/' + prefix
-    if (!prefix.endsWith('/')) prefix = prefix + '/'
-    return prefix
 }
 
 addEventListener('fetch', e => {
@@ -73,26 +52,23 @@ addEventListener('fetch', e => {
 async function fetchHandler(e) {
     const req = e.request
     const urlObj = new URL(req.url)
-    const prefix = normalizePrefix(CONFIG.PREFIX)
 
-    if (req.method === 'OPTIONS') {
-        return PREFLIGHT_RESP
+let path = urlObj.searchParams.get('q')
+if (path) {
+    const normalizedPath = path.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
+    
+    if (GITHUB_PATTERNS.some(p => p.test(normalizedPath))) {
+        return Response.redirect(
+            'https://' + urlObj.host + CONFIG.PREFIX + normalizedPath, 
+            301
+        )
     }
-
-    let path = urlObj.searchParams.get('q')
-    if (path) {
-        const normalizedPath = path.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
-        const redirectTarget = new URL(prefix + normalizedPath, `https://${urlObj.host}`)
-
-        if (redirectTarget.host !== urlObj.host || !isValidGitHubUrl(normalizedPath)) {
-            return makeRes('Blocked: Invalid redirect target. Only GitHub URLs are allowed.', 400)
-        }
-        return Response.redirect(redirectTarget.href, 302)
-    }
+    return makeRes('Blocked: Invalid redirect target. Only GitHub URLs are allowed.', 400)
+}
 
     let rawPath = urlObj.pathname
-    if (rawPath.startsWith(prefix)) {
-        rawPath = rawPath.slice(prefix.length)
+    if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) {
+        rawPath = rawPath.slice(CONFIG.PREFIX.length)
     }
     path = rawPath.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
 
@@ -164,7 +140,7 @@ async function fetchHandler(e) {
 <body>
     <div class="container">
         <div class="logo">
-            <a href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank" rel="noopener noreferrer">
+            <a href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank">
                 <svg xmlns="http://www.w3.org/2000/svg" width="120" height="90" viewBox="0 0 98 96" fill="#ffffff">
                     <path fill-rule="evenodd" clip-rule="evenodd" d="M48.854 0C21.839 0 0 22 0 49.217c0 21.756 13.993 40.172 33.405 46.69 2.427.49 3.316-1.059 3.316-2.362 0-1.141-.08-5.052-.08-9.127-13.59 2.934-16.42-5.867-16.42-5.867-2.184-5.704-5.42-7.17-5.42-7.17-4.448-3.015.324-3.015.324-3.015 4.934.326 7.523 5.052 7.523 5.052 4.367 7.496 11.404 5.378 14.235 4.074.404-3.178 1.699-5.378 3.074-6.6-10.839-1.141-22.243-5.378-22.243-24.283 0-5.378 1.94-9.778 5.014-13.2-.485-1.222-2.184-6.275.486-13.038 0 0 4.125-1.304 13.426 5.052a46.97 46.97 0 0 1 12.214-1.63c4.125 0 8.33.571 12.213 1.63 9.302-6.356 13.427-5.052 13.427-5.052 2.67 6.763.97 11.816.485 13.038 3.155 3.422 5.015 7.822 5.015 13.2 0 18.905-11.404 23.06-22.324 24.283 1.78 1.548 3.316 4.481 3.316 9.126 0 6.6-.08 11.897-.08 13.526 0 1.304.89 2.853 3.316 2.364 19.412-6.52 33.405-24.935 33.405-46.691C97.707 22 75.788 0 48.854 0z"/>
                 </svg>
@@ -172,7 +148,7 @@ async function fetchHandler(e) {
         </div>
         <h1 class="title">GitHub文件及api加速</h1>
         <form onsubmit="toSubmit(event)" class="search-container">
-            <input type="text" class="search-input" name="q" placeholder="请输入GitHub文件or api链接" required>
+            <input type="text" class="search-input" name="q" placeholder="请输入GitHub文件or api链接" pattern="^((https|http)://)?(github.com/.+?/.+?/(?:releases|archive|blob|raw|suites)|((?:raw|gist|api).(?:githubusercontent|github).com))/.+$" required>
             <button type="submit" class="search-button">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M13 5l7 7-7 7M5 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
@@ -186,52 +162,49 @@ async function fetchHandler(e) {
             <p>🖨️ gist：https://gist.githubusercontent.com/xxxxxx/123/raw/cmd.py</p>
             <p>☁️ api： https://api.github.com/repos/xxxxxx/CF-Workers-GitHub-Proxy</p>
         </div>
-        <p><a href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank" rel="noopener noreferrer">QFMC</a> 访问以参考项目</p>
+            <p><a href="https://github.com/qfmc7040/CF-GH-Proxy/">QFMC</a> 访问以参考项目</p>
     </div>
     <script>
-        const GITHUB_PATTERNS = ${JSON.stringify(GITHUB_PATTERNS.map(p => p.toString()))};
-        const PREFIX = '${prefix}';
-        function isValidGitHubUrl(url) {
-            return GITHUB_PATTERNS.some(p => new RegExp(p).test(url));
-        }
         function toSubmit(e) {
             e.preventDefault();
-            var raw = document.getElementsByName('q')[0].value.trim();
-            var safeUrl = raw.replace(/^https?:\\/+/, 'https://');
-            if (!isValidGitHubUrl(safeUrl)) {
-                alert('仅支持 GitHub 相关链接');
-                return;
-            }
-            window.open(location.origin + PREFIX + safeUrl, '_blank', 'noopener,noreferrer');
+            const input = document.getElementsByName('q')[0];
+            const baseUrl = location.href.substr(0, location.href.lastIndexOf('/') + 1);
+            window.open(baseUrl + input.value);
         }
     </script>
 </body>
-</html>`
+</html>`;
         return new Response(html, {
             status: 200,
             headers: { 'content-type': 'text/html; charset=utf-8', ...CORS_HEADERS }
-        })
+        });
     }
 
-    if (isValidGitHubUrl(path)) {
-        return proxyRequest(e, req, path)
-    }
-
+if (GITHUB_PATTERNS.some(p => p.test(path))) {
+    return proxyRequest(e, req, path)
+} else {
     return makeRes(
-        JSON.stringify({
-            error: 'Not Found',
+        JSON.stringify({ 
+            error: 'Not Found', 
             message: 'Only GitHub URLs are supported. Please check your input.',
             supported_patterns: GITHUB_PATTERNS.map(p => p.toString())
-        }),
-        404,
+        }), 
+        404, 
         { 'content-type': 'application/json; charset=utf-8' }
     )
 }
+}
 
 async function proxyRequest(e, req, pathname) {
-    const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
-    const normalizedUrl = normalizeCacheUrl(targetUrl)
-    const cacheKey = new Request(normalizedUrl, { method: 'GET' })
+
+    const cacheKeyUrl = new URL(pathname.startsWith('http') ? pathname : `https://${pathname}`)
+    const STABLE_PARAMS = ['ref', 'tag', 'branch', 'commit']
+    for (const key of [...cacheKeyUrl.searchParams.keys()]) {
+        if (!STABLE_PARAMS.includes(key)) {
+            cacheKeyUrl.searchParams.delete(key)
+        }
+    }
+    const cacheKey = new Request(cacheKeyUrl.href, { method: 'GET' })
     const cache = caches.default
 
     if (req.method === 'GET') {
@@ -242,14 +215,17 @@ async function proxyRequest(e, req, pathname) {
             const cachedEtag = cached.headers.get('etag')
             const cachedLastModified = cached.headers.get('last-modified')
 
-            if ((clientEtag && clientEtag === cachedEtag) ||
+            if ((clientEtag && clientEtag === cachedEtag) || 
                 (clientLastModified && clientLastModified === cachedLastModified)) {
-                const headers304 = new Headers(cached.headers)
-                headers304.set('x-cache-status', 'HIT-304')
-                headers304.delete('content-length')
-                headers304.delete('content-encoding')
-                headers304.delete('transfer-encoding')
-                return new Response(null, { status: 304, headers: headers304 })
+                return new Response(null, {
+                    status: 304,
+                    headers: { 
+                        ...CORS_HEADERS,
+                        'etag': cachedEtag || '',
+                        'last-modified': cachedLastModified || '',
+                        'x-cache-status': 'HIT-304'
+                    }
+                })
             }
 
             const hitHeaders = new Headers(cached.headers)
@@ -258,6 +234,7 @@ async function proxyRequest(e, req, pathname) {
         }
     }
 
+    const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
     const urlObj = newUrl(targetUrl)
     if (!urlObj) return makeRes('Invalid target URL', 400)
 
@@ -275,13 +252,6 @@ async function proxyRequest(e, req, pathname) {
     const response = await handleProxyFetch(urlObj, init, 0)
 
     if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
-        const cc = response.headers.get('cache-control') || ''
-        if (cc.includes('no-store') || cc.includes('private')) {
-            const missHeaders = new Headers(response.headers)
-            missHeaders.set('x-cache-status', 'NO-STORE')
-            return new Response(response.body, { status: response.status, headers: missHeaders })
-        }
-
         const cacheHeaders = new Headers(response.headers)
         cacheHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
         cacheHeaders.set('x-cache-status', 'MISS')
@@ -307,22 +277,17 @@ async function handleProxyFetch(urlObj, init, redirectCount) {
         const res = await fetch(urlObj.href, init)
 
         if ([301, 302, 303, 307, 308].includes(res.status)) {
-            const location = res.headers.get('location')
+            let location = res.headers.get('location')
             if (!location) return res
 
             const nextUrl = new URL(location, urlObj.href)
 
-            if (!/^https?:\/\//i.test(nextUrl.href)) {
-                return makeRes('Blocked: Invalid redirect protocol', 400)
-            }
-
-            if (isValidGitHubUrl(nextUrl.href)) {
-                const rewrittenLocation = new URL(CONFIG.PREFIX + nextUrl.href, `https://${urlObj.host}`).href
+            if (GITHUB_PATTERNS.some(p => p.test(nextUrl.href))) {
                 return new Response(null, {
                     status: res.status,
                     headers: {
                         ...Object.fromEntries(res.headers),
-                        location: rewrittenLocation,
+                        location: CONFIG.PREFIX + nextUrl.href,
                         ...CORS_HEADERS
                     }
                 })
@@ -340,6 +305,7 @@ async function handleProxyFetch(urlObj, init, redirectCount) {
             status: res.status,
             headers: { ...resHdrNew, ...CORS_HEADERS }
         })
+
     } catch (err) {
         return makeRes('Proxy Error: ' + err.message, 502)
     }
