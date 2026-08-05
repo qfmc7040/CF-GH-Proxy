@@ -13,6 +13,7 @@ const CONFIG = {
 const GITHUB_PATTERNS = [
     /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/(?:releases|archive|tags|info|git-)\/.*$/i,
     /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/(?:blob|raw)\/.*$/i,
+    /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/actions\/runs\/\d+\/artifacts\/\d+$/i,
     /^(?:https?:\/\/)?raw\.(?:githubusercontent|github)\.com\/.+?\/.+?\/.+?\/.+$/i,
     /^(?:https?:\/\/)?gist\.(?:githubusercontent|github)\.com\/.+?\/.+?\/.+$/i,
     /^(?:https?:\/\/)?api\.github\.com\/.*$/i,
@@ -205,6 +206,7 @@ async function fetchHandler(e) {
             <p>💾 https://github.com/user/repo/blob/main/README.md</p>
             <p>🖨️ https://gist.githubusercontent.com/user/id/raw/file.py</p>
             <p>☁️ https://api.github.com/repos/user/repo</p>
+            <p>⏩️ https://github.com/user/repo/actions/runs/id/artifacts/ID<p>
         </div>
         <p style="margin-top:2rem;color:rgba(255,255,255,.6)"><a href="https://github.com/qfmc7040/CF-GH-Proxy/" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.4)">QFMC</a> 访问以参考项目</p>
     </div>
