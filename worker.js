@@ -120,32 +120,36 @@ function getDynamicCorsHeaders(req, targetUrl) {
     return { ...CORS_HEADERS }
 }
 
-async function checkRateLimit(req) {
+async function checkRateLimit(req, event) {
     const ip = req.headers.get('cf-connecting-ip') || 'unknown'
-    const cacheKey = new Request(`https://rate-limit.internal/${ip}`, { method: 'GET' })
+    const now = Math.floor(Date.now() / 1000)
+    const windowKey = `rl:${ip}:${Math.floor(now / CONFIG.RATE_LIMIT_WINDOW)}`
+    const cacheKey = new Request(`https://rate-limit.internal/${windowKey}`, { method: 'GET' })
     const cache = caches.default
 
-    let count = 0
     const cached = await cache.match(cacheKey)
     if (cached) {
-        count = parseInt(await cached.text(), 10) || 0
+        const count = parseInt(await cached.text(), 10) || 0
+        if (count >= CONFIG.RATE_LIMIT_MAX) {
+            const retryAfter = (Math.floor(now / CONFIG.RATE_LIMIT_WINDOW) + 1) * CONFIG.RATE_LIMIT_WINDOW - now
+            return makeRes(
+                JSON.stringify({ error: 'Rate limit exceeded', retry_after: retryAfter }),
+                429,
+                {
+                    'content-type': 'application/json; charset=utf-8',
+                    'retry-after': String(retryAfter),
+                }
+            )
+        }
     }
 
-    if (count >= CONFIG.RATE_LIMIT_MAX) {
-        return makeRes(
-            JSON.stringify({ error: 'Rate limit exceeded', retry_after: CONFIG.RATE_LIMIT_WINDOW }),
-            429,
-            {
-                'content-type': 'application/json; charset=utf-8',
-                'retry-after': String(CONFIG.RATE_LIMIT_WINDOW),
-            }
-        )
-    }
-
-    const counterResp = new Response(String(count + 1), {
-        headers: { 'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}` }
+    const newCount = cached ? (parseInt(await cached.text(), 10) || 0) + 1 : 1
+    const counterResp = new Response(String(newCount), {
+        headers: {
+            'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}`
+        }
     })
-    await cache.put(cacheKey, counterResp)
+    event.waitUntil(cache.put(cacheKey, counterResp))
     return null
 }
 
@@ -230,8 +234,48 @@ async function proxyRequest(e, req, pathname) {
     const cacheKey = buildCacheKey(pathname)
     const cache = caches.default
     const dynamicCors = getDynamicCorsHeaders(req, pathname)
-
     const isArtifact = isArtifactPath(pathname)
+
+    if (isArtifact && req.method === 'GET') {
+        const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
+        const urlObj = newUrl(targetUrl)
+        if (!urlObj) return makeRes('Invalid target URL', 400)
+
+        const probeHeaders = new Headers(req.headers)
+        probeHeaders.delete('cookie')
+        probeHeaders.delete('authorization')
+        probeHeaders.delete('host')
+
+        try {
+            const probeRes = await fetch(urlObj.href, {
+                method: 'GET',
+                headers: probeHeaders,
+                redirect: 'manual',
+                cf: { cacheEverything: false }
+            })
+
+            if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
+                const location = probeRes.headers.get('location')
+                if (location) {
+                    const redirectHeaders = new Headers()
+                    redirectHeaders.set('location', location)
+                    redirectHeaders.set('access-control-allow-origin', '*')
+                    redirectHeaders.set('access-control-expose-headers', '*')
+                    redirectHeaders.set('x-content-type-options', 'nosniff')
+                    redirectHeaders.set('referrer-policy', 'strict-origin-when-cross-origin')
+                    redirectHeaders.set('x-cache-status', 'REDIRECT-ARTIFACT')
+                    const ct = probeRes.headers.get('content-type')
+                    if (ct) redirectHeaders.set('content-type', ct)
+                    const cl = probeRes.headers.get('content-length')
+                    if (cl) redirectHeaders.set('content-length', cl)
+
+                    return new Response(null, { status: 302, headers: redirectHeaders })
+                }
+            }
+        } catch (err) {
+            console.error('[Artifact Probe Error]', err)
+        }
+    }
 
     if (req.method === 'GET' && !isArtifact) {
         const cached = await cache.match(cacheKey)
