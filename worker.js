@@ -221,7 +221,7 @@ function buildCacheKey(pathname) {
         /\/actions\/runs\/\d+\/artifacts\//,
     ]
     if (NO_SIMPLIFY_PATTERNS.some(p => p.test(url.hostname) || p.test(url.pathname))) {
-        return new Request(url.href, { method: 'GET' })
+        return new Request(url.href, { method: 'GET' });
     }
     const STABLE_PARAMS = ['ref', 'tag', 'branch', 'commit']
     for (const key of [...url.searchParams.keys()]) {
@@ -236,44 +236,45 @@ async function proxyRequest(e, req, pathname) {
     const dynamicCors = getDynamicCorsHeaders(req, pathname)
     const isArtifact = isArtifactPath(pathname)
 
-    if (isArtifact && req.method === 'GET') {
-        const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
-        const urlObj = newUrl(targetUrl)
-        if (!urlObj) return makeRes('Invalid target URL', 400)
+    if (isArtifactPath(pathname)) {
+        const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`;
+        const urlObj = newUrl(targetUrl);
+        if (!urlObj) return makeRes('Invalid target URL', 400);
 
-        const probeHeaders = new Headers(req.headers)
-        probeHeaders.delete('cookie')
-        probeHeaders.delete('authorization')
-        probeHeaders.delete('host')
+        const probeHeaders = new Headers(req.headers);
+        probeHeaders.delete('authorization');
+        probeHeaders.delete('host');
+        probeHeaders.delete('content-length');
 
         try {
             const probeRes = await fetch(urlObj.href, {
-                method: 'GET',
+                method: 'HEAD', 
                 headers: probeHeaders,
                 redirect: 'manual',
                 cf: { cacheEverything: false }
-            })
+            });
 
             if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
-                const location = probeRes.headers.get('location')
+                const location = probeRes.headers.get('location');
                 if (location) {
-                    const redirectHeaders = new Headers()
-                    redirectHeaders.set('location', location)
-                    redirectHeaders.set('access-control-allow-origin', '*')
-                    redirectHeaders.set('access-control-expose-headers', '*')
-                    redirectHeaders.set('x-content-type-options', 'nosniff')
-                    redirectHeaders.set('referrer-policy', 'strict-origin-when-cross-origin')
-                    redirectHeaders.set('x-cache-status', 'REDIRECT-ARTIFACT')
-                    const ct = probeRes.headers.get('content-type')
-                    if (ct) redirectHeaders.set('content-type', ct)
-                    const cl = probeRes.headers.get('content-length')
-                    if (cl) redirectHeaders.set('content-length', cl)
-
-                    return new Response(null, { status: 302, headers: redirectHeaders })
+                    const nextUrl = new URL(location, urlObj.href);
+                    if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
+                        return new Response(null, {
+                            status: 302,
+                            headers: {
+                                'Location': location,
+                                'Access-Control-Allow-Origin': '*',
+                                'X-Cache-Status': 'ARTIFACT-DIRECT',
+                                'Cache-Control': 'no-store'
+                            }
+                        });
+                    }
                 }
             }
+        
+        
         } catch (err) {
-            console.error('[Artifact Probe Error]', err)
+            console.error('[Artifact Direct Link Failed]', err);
         }
     }
 
@@ -331,7 +332,7 @@ async function proxyRequest(e, req, pathname) {
         cf: {
             cacheEverything: true,
             cacheTtlByStatus: isArtifact
-                ? { "200-299": 0, "404": 1 }
+                ? { "200-299": 0, "301-399": 0, "404": 1 }
                 : { "200-299": CONFIG.CACHE_TTL, "404": 1 },
         }
     }, 0)
