@@ -127,10 +127,13 @@ async function checkRateLimit(req, event) {
     const cacheKey = new Request(`https://rate-limit.internal/${windowKey}`, { method: 'GET' })
     const cache = caches.default
 
+    let currentCount = 0
     const cached = await cache.match(cacheKey)
+    
     if (cached) {
-        const count = parseInt(await cached.text(), 10) || 0
-        if (count >= CONFIG.RATE_LIMIT_MAX) {
+        currentCount = parseInt(await cached.text(), 10) || 0
+        
+        if (currentCount >= CONFIG.RATE_LIMIT_MAX) {
             const retryAfter = (Math.floor(now / CONFIG.RATE_LIMIT_WINDOW) + 1) * CONFIG.RATE_LIMIT_WINDOW - now
             return makeRes(
                 JSON.stringify({ error: 'Rate limit exceeded', retry_after: retryAfter }),
@@ -143,7 +146,7 @@ async function checkRateLimit(req, event) {
         }
     }
 
-    const newCount = cached ? (parseInt(await cached.text(), 10) || 0) + 1 : 1
+    const newCount = currentCount + 1
     const counterResp = new Response(String(newCount), {
         headers: {
             'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}`
@@ -242,13 +245,14 @@ async function proxyRequest(e, req, pathname) {
         if (!urlObj) return makeRes('Invalid target URL', 400);
 
         const probeHeaders = new Headers(req.headers);
-        probeHeaders.delete('authorization');
         probeHeaders.delete('host');
         probeHeaders.delete('content-length');
+        probeHeaders.delete('connection');
+        probeHeaders.delete('keep-alive');
 
         try {
             const probeRes = await fetch(urlObj.href, {
-                method: 'HEAD', 
+                method: 'HEAD',
                 headers: probeHeaders,
                 redirect: 'manual',
                 cf: { cacheEverything: false }
@@ -257,22 +261,24 @@ async function proxyRequest(e, req, pathname) {
             if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
                 const location = probeRes.headers.get('location');
                 if (location) {
-                    const nextUrl = new URL(location, urlObj.href);
-                    if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
-                        return new Response(null, {
-                            status: 302,
-                            headers: {
-                                'Location': location,
-                                'Access-Control-Allow-Origin': '*',
-                                'X-Cache-Status': 'ARTIFACT-DIRECT',
-                                'Cache-Control': 'no-store'
-                            }
-                        });
+                    try {
+                        const nextUrl = new URL(location, urlObj.href);
+                        if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
+                            return new Response(null, {
+                                status: 302,
+                                headers: {
+                                    'Location': location,
+                                    'Access-Control-Allow-Origin': '*',
+                                    'X-Cache-Status': 'ARTIFACT-DIRECT',
+                                    'Cache-Control': 'no-store'
+                                }
+                            });
+                        }
+                    } catch (urlErr) {
+                        console.error('[Artifact URL Parse Error]', location, urlErr);
                     }
                 }
             }
-        
-        
         } catch (err) {
             console.error('[Artifact Direct Link Failed]', err);
         }
