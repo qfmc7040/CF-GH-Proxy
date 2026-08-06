@@ -12,7 +12,7 @@ const CONFIG = {
 const GITHUB_PATTERNS = [
     /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/(?:releases|archive|tags|info|git-)\/.*$/i,
     /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/(?:blob|raw)\/.*$/i,
-    /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/actions\/runs\/\d+\/artifacts\/\d+$/i,
+    /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/actions\/runs\/\d+\/artifacts\/\d+(?:\/.*)?$/i,
     /^(?:https?:\/\/)?raw\.(?:githubusercontent|github)\.com\/.+?\/.+?\/.+?\/.+$/i,
     /^(?:https?:\/\/)?gist\.(?:githubusercontent|github)\.com\/.+?\/.+?\/.+$/i,
     /^(?:https?:\/\/)?api\.github\.com\/.*$/i,
@@ -33,6 +33,11 @@ const SAFE_REDIRECT_HOSTS = new Set([
     'copilot.githubusercontent.com',
     'actions.githubusercontent.com',
 ])
+
+const AZURE_BLOB_SUFFIXES = [
+    '.blob.core.windows.net',
+    '.azureedge.net',
+]
 
 const ALLOWED_HOSTNAMES = [
     'github.com', 'raw.githubusercontent.com', 'raw.github.com',
@@ -90,6 +95,14 @@ function isSensitivePath(urlStr) {
         if (url.searchParams.has('token') || url.searchParams.has('key')) return true
         return false
     } catch { return false }
+}
+
+function isArtifactPath(pathname) {
+    return /\/actions\/runs\/\d+\/artifacts\/\d+/.test(pathname)
+}
+
+function isSafeAzureRedirect(hostname) {
+    return AZURE_BLOB_SUFFIXES.some(suffix => hostname.endsWith(suffix))
 }
 
 function getDynamicCorsHeaders(req, targetUrl) {
@@ -201,6 +214,7 @@ function buildCacheKey(pathname) {
         /^api\.github\.com$/,
         /\/releases\/download\//,
         /^gist\.(?:githubusercontent|github)\.com$/,
+        /\/actions\/runs\/\d+\/artifacts\//,
     ]
     if (NO_SIMPLIFY_PATTERNS.some(p => p.test(url.hostname) || p.test(url.pathname))) {
         return new Request(url.href, { method: 'GET' })
@@ -217,7 +231,9 @@ async function proxyRequest(e, req, pathname) {
     const cache = caches.default
     const dynamicCors = getDynamicCorsHeaders(req, pathname)
 
-    if (req.method === 'GET') {
+    const isArtifact = isArtifactPath(pathname)
+
+    if (req.method === 'GET' && !isArtifact) {
         const cached = await cache.match(cacheKey)
         if (cached) {
             const clientEtag = req.headers.get('if-none-match')
@@ -252,8 +268,10 @@ async function proxyRequest(e, req, pathname) {
     if (!urlObj) return makeRes('Invalid target URL', 400)
 
     const reqHdrNew = new Headers(req.headers)
-    reqHdrNew.delete('cookie')
-    reqHdrNew.delete('authorization')
+    if (!isArtifact) {
+        reqHdrNew.delete('cookie')
+        reqHdrNew.delete('authorization')
+    }
     reqHdrNew.delete('host')
 
     const rangeHeader = req.headers.get('range')
@@ -268,7 +286,9 @@ async function proxyRequest(e, req, pathname) {
         body: req.body,
         cf: {
             cacheEverything: true,
-            cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "404": 1 },
+            cacheTtlByStatus: isArtifact
+                ? { "200-299": 0, "404": 1 }
+                : { "200-299": CONFIG.CACHE_TTL, "404": 1 },
         }
     }, 0)
 
@@ -279,7 +299,7 @@ async function proxyRequest(e, req, pathname) {
         return new Response(response.body, { status: response.status, headers: errorHeaders })
     }
 
-    if (req.method === 'GET' && (response.status >= 200 && response.status < 400)) {
+    if (req.method === 'GET' && !isArtifact && (response.status >= 200 && response.status < 400)) {
         const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
         const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
 
@@ -306,7 +326,7 @@ async function proxyRequest(e, req, pathname) {
     }
 
     const missHeaders = new Headers(response.headers)
-    missHeaders.set('x-cache-status', 'BYPASS')
+    missHeaders.set('x-cache-status', isArtifact ? 'BYPASS-ARTIFACT' : 'BYPASS')
     for (const [k, v] of Object.entries(dynamicCors)) missHeaders.set(k, v)
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) missHeaders.set(k, v)
     return new Response(response.body, { status: response.status, headers: missHeaders })
@@ -324,7 +344,8 @@ async function handleProxyFetch(urlObj, init, redirectCount) {
             const nextUrl = new URL(location, urlObj.href)
 
             if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) ||
-                GITHUB_PATTERNS.some(p => p.test(nextUrl.href))) {
+                GITHUB_PATTERNS.some(p => p.test(nextUrl.href)) ||
+                isSafeAzureRedirect(nextUrl.hostname)) {
                 return handleProxyFetch(nextUrl, init, redirectCount + 1)
             } else {
                 const safeHeaders = new Headers(res.headers)
@@ -368,10 +389,15 @@ function serveIndex() {
         .search-input:focus{border-color:var(--primary-color);background:#fff;outline:none;box-shadow:0 0 0 3px rgba(0,102,255,.2)}
         .search-button{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:44px;height:44px;border:none;border-radius:8px;background:var(--primary-color);color:#fff;cursor:pointer;transition:all .2s ease}
         .search-button:hover{background:var(--primary-hover);transform:translateY(-50%) scale(1.05)}
-        .example-title{color:#9ba1a6;margin-bottom:1.5rem;font-size:1rem;font-weight:700;position:relative;padding-bottom:.8rem;border-bottom:1px solid rgba(255,255,255,.1)}
-        .example p{margin:.8rem 0;font-family:monospace;font-size:.95rem;color:rgba(255,255,255,.8);padding-left:1.5rem;line-height:1.4;word-break:break-all}
+        .example-title{color:#9ba1a6;margin-bottom:1rem;font-size:1rem;font-weight:700;position:relative;padding-bottom:.8rem;border-bottom:1px solid rgba(255,255,255,.1)}
         .example{margin-top:2rem;padding:1.8rem;background:rgba(255,255,255,.05);border-radius:12px;text-align:left;border:1px solid rgba(255,255,255,.1);overflow-wrap:break-word}
-        @media(max-width:640px){.container{padding:20px}.title{font-size:2rem}.search-input{height:50px;font-size:.9rem}.search-button{width:38px;height:38px}.example{padding:1rem;font-size:.8rem}}
+        .example-list{max-height:260px;overflow-y:auto;margin-top:.5rem;padding-right:8px;scroll-behavior:smooth;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.2) rgba(255,255,255,.05)}
+        .example-list::-webkit-scrollbar{width:6px}
+        .example-list::-webkit-scrollbar-track{background:rgba(255,255,255,.05);border-radius:3px}
+        .example-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:3px}
+        .example-list::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.35)}
+        .example-list p{margin:.6rem 0;font-family:monospace;font-size:.9rem;color:rgba(255,255,255,.8);padding-left:1.2rem;line-height:1.4;word-break:break-all}
+        @media(max-width:640px){.container{padding:20px}.title{font-size:2rem}.search-input{height:50px;font-size:.9rem}.search-button{width:38px;height:38px}.example{padding:1rem;font-size:.8rem}.example-list{max-height:180px}}
     </style>
 </head>
 <body>
@@ -384,12 +410,31 @@ function serveIndex() {
         </form>
         <div class="example">
             <div class="example-title">📃 合法输入示例：</div>
-            <p>📄 https://github.com/user/repo/archive/master.zip</p>
-            <p>📂 https://github.com/user/repo/releases/download/v1.0/file.zip</p>
-            <p>💾 https://github.com/user/repo/blob/main/README.md</p>
-            <p>🖨️ https://gist.githubusercontent.com/user/id/raw/file.py</p>
-            <p>☁️ https://api.github.com/repos/user/repo</p>
-            <p>⏩️ https://github.com/user/repo/actions/runs/id/artifacts/ID</p>
+            <div class="example-list">
+                <p>📄 https://github.com/user/repo/archive/master.zip</p>
+                <p>📦 https://github.com/user/repo/archive/refs/heads/main.tar.gz</p>
+                <p>🏷️ https://github.com/user/repo/tags</p>
+                <p>ℹ️ https://github.com/user/repo/info/refs?service=git-upload-pack</p>
+                <p>🔧 https://github.com/user/repo/git-upload-pack</p>
+                <p>📂 https://github.com/user/repo/releases/download/v1.0/file.zip</p>
+                <p>💾 https://github.com/user/repo/blob/main/README.md</p>
+                <p>📝 https://github.com/user/repo/raw/main/src/index.js</p>
+                <p>⏩ https://github.com/user/repo/actions/runs/123456/artifacts/789012</p>
+                <p>📥 https://github.com/user/repo/actions/runs/123456/artifacts/789012/zip</p>
+                <p>🌐 https://raw.githubusercontent.com/user/repo/main/file.txt</p>
+                <p>🌐 https://raw.github.com/user/repo/main/file.txt</p>
+                <p>🖨️ https://gist.githubusercontent.com/user/hash/raw/file.py</p>
+                <p>🖨️ https://gist.github.com/user/hash</p>
+                <p>☁️ https://api.github.com/repos/user/repo</p>
+                <p>☁️ https://api.github.com/users/user</p>
+                <p>🗜️ https://codeload.github.com/user/repo/tar.gz/main</p>
+                <p>🗜️ https://codeload.github.com/user/repo/zip/refs/tags/v1.0</p>
+                <p>🗜️ https://codeload.github.com/user/repo/legacy.zip/main</p>
+                <p>🔗 https://objects.githubusercontent.com/github-production-upload/...</p>
+                <p>🎨 https://github.githubassets.com/assets/mona-xxx.svg</p>
+                <p>🤖 https://copilot.githubusercontent.com/...</p>
+                <p>⚙️ https://actions.githubusercontent.com/...</p>
+            </div>
         </div>
         <p style="margin-top:2rem;color:rgba(255,255,255,.6)"><a href="https://github.com/qfmc7040/CF-GH-Proxy/" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.4)">QFMC</a> 访问以参考项目</p>
     </div>
