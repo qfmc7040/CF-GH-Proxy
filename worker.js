@@ -23,21 +23,14 @@ const GITHUB_PATTERNS = [
 ]
 
 const SAFE_REDIRECT_HOSTS = new Set([
-    'objects.githubusercontent.com',
-    'github-releases.githubusercontent.com',
-    'release-assets.githubusercontent.com',
-    'raw.githubusercontent.com',
-    'gist.githubusercontent.com',
-    'codeload.github.com',
-    'github.githubassets.com',
-    'copilot.githubusercontent.com',
+    'objects.githubusercontent.com', 'github-releases.githubusercontent.com',
+    'release-assets.githubusercontent.com', 'raw.githubusercontent.com',
+    'gist.githubusercontent.com', 'codeload.github.com',
+    'github.githubassets.com', 'copilot.githubusercontent.com',
     'actions.githubusercontent.com',
 ])
 
-const AZURE_BLOB_SUFFIXES = [
-    '.blob.core.windows.net',
-    '.azureedge.net',
-]
+const AZURE_BLOB_SUFFIXES = ['.blob.core.windows.net', '.azureedge.net']
 
 const ALLOWED_HOSTNAMES = [
     'github.com', 'raw.githubusercontent.com', 'raw.github.com',
@@ -60,9 +53,7 @@ const CORS_HEADERS = {
 
 const PREFLIGHT_RESP = new Response(null, {
     status: 204,
-    headers: {
-        ...CORS_HEADERS,
-        ...SECURITY_HEADERS,
+    headers: { ...CORS_HEADERS, ...SECURITY_HEADERS,
         'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS',
         'access-control-allow-headers': 'Content-Type, Authorization, Accept, X-Requested-With',
         'access-control-max-age': '1728000',
@@ -70,31 +61,19 @@ const PREFLIGHT_RESP = new Response(null, {
 })
 
 function makeRes(body, status = 200, headers = {}) {
-    return new Response(body, {
-        status,
-        headers: { ...CORS_HEADERS, ...SECURITY_HEADERS, ...headers }
-    })
+    return new Response(body, { status, headers: { ...CORS_HEADERS, ...SECURITY_HEADERS, ...headers } })
 }
 
 function makeErrorRes(err) {
-    if (CONFIG.IS_PRODUCTION) {
-        console.error('[Worker Error]', err)
-        return makeRes('Internal Server Error', 500)
-    }
-    return makeRes('cfworker error:\n' + err.stack, 502)
+    console.error('[Worker Error]', err)
+    return makeRes(CONFIG.IS_PRODUCTION ? 'Internal Server Error' : (err.stack || err.message), CONFIG.IS_PRODUCTION ? 500 : 502)
 }
 
 function newUrl(urlStr) {
-    try { return new URL(urlStr) } catch { return null }
-}
-
-function isSensitivePath(urlStr) {
     try {
-        const url = new URL(urlStr.startsWith('http') ? urlStr : `https://${urlStr}`)
-        if (url.hostname === 'api.github.com') return true
-        if (url.searchParams.has('token') || url.searchParams.has('key')) return true
-        return false
-    } catch { return false }
+        if (!urlStr.startsWith('http')) urlStr = 'https://' + urlStr
+        return new URL(urlStr)
+    } catch { return null }
 }
 
 function isArtifactPath(pathname) {
@@ -105,320 +84,288 @@ function isSafeAzureRedirect(hostname) {
     return AZURE_BLOB_SUFFIXES.some(suffix => hostname.endsWith(suffix))
 }
 
-function getDynamicCorsHeaders(req, targetUrl) {
-    if (isSensitivePath(targetUrl)) {
-        const origin = req.headers.get('origin')
-        if (origin) {
-            return {
-                'access-control-allow-origin': origin,
-                'access-control-expose-headers': '*',
-                'vary': 'Origin',
+async function checkRateLimit(req, event) {
+    try {
+        const ip = req.headers.get('cf-connecting-ip') || 'unknown'
+        const now = Math.floor(Date.now() / 1000)
+        const windowKey = `rl:${ip}:${Math.floor(now / CONFIG.RATE_LIMIT_WINDOW)}`
+        const cacheKey = `https://cache.internal/rate-limit/${windowKey}`
+        const cache = caches.default
+        let currentCount = 0
+        const cacheReq = new Request(cacheKey, { method: 'GET' })
+        const cached = await cache.match(cacheReq)
+        if (cached) {
+            currentCount = parseInt(await cached.text(), 10) || 0
+            if (currentCount >= CONFIG.RATE_LIMIT_MAX) {
+                const retryAfter = (Math.floor(now / CONFIG.RATE_LIMIT_WINDOW) + 1) * CONFIG.RATE_LIMIT_WINDOW - now
+                return makeRes(JSON.stringify({ error: 'Rate limit exceeded', retry_after: retryAfter }), 429, {
+                    'content-type': 'application/json; charset=utf-8', 'retry-after': String(retryAfter),
+                })
             }
         }
-        return { 'access-control-expose-headers': '*' }
-    }
-    return { ...CORS_HEADERS }
-}
-
-async function checkRateLimit(req, event) {
-    const ip = req.headers.get('cf-connecting-ip') || 'unknown'
-    const now = Math.floor(Date.now() / 1000)
-    const windowKey = `rl:${ip}:${Math.floor(now / CONFIG.RATE_LIMIT_WINDOW)}`
-    const cacheKey = new Request(`https://rate-limit.internal/${windowKey}`, { method: 'GET' })
-    const cache = caches.default
-
-    let currentCount = 0
-    const cached = await cache.match(cacheKey)
-    
-    if (cached) {
-        currentCount = parseInt(await cached.text(), 10) || 0
-        
-        if (currentCount >= CONFIG.RATE_LIMIT_MAX) {
-            const retryAfter = (Math.floor(now / CONFIG.RATE_LIMIT_WINDOW) + 1) * CONFIG.RATE_LIMIT_WINDOW - now
-            return makeRes(
-                JSON.stringify({ error: 'Rate limit exceeded', retry_after: retryAfter }),
-                429,
-                {
-                    'content-type': 'application/json; charset=utf-8',
-                    'retry-after': String(retryAfter),
-                }
-            )
-        }
-    }
-
-    const newCount = currentCount + 1
-    const counterResp = new Response(String(newCount), {
-        headers: {
-            'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}`
-        }
-    })
-    event.waitUntil(cache.put(cacheKey, counterResp))
-    return null
+        event.waitUntil(cache.put(cacheReq, new Response(String(currentCount + 1), {
+            headers: { 'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}` }
+        })))
+        return null
+    } catch (e) { console.warn('Rate limit bypass:', e); return null }
 }
 
 addEventListener('fetch', e => {
-    const ret = fetchHandler(e).catch(err => makeErrorRes(err))
-    e.respondWith(ret)
+    e.respondWith(fetchHandler(e).catch(makeErrorRes))
 })
 
 async function fetchHandler(e) {
     const req = e.request
     const urlObj = new URL(req.url)
+    if (req.method === 'OPTIONS') return PREFLIGHT_RESP
 
-    if (req.method === 'OPTIONS') {
-        return PREFLIGHT_RESP
-    }
-
-    const rateLimited = await checkRateLimit(req)
+    const rateLimited = await checkRateLimit(req, e)
     if (rateLimited) return rateLimited
 
     let path = urlObj.searchParams.get('q')
     if (path) {
         const normalizedPath = path.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
-
         const patternMatch = GITHUB_PATTERNS.some(p => p.test(normalizedPath))
         let hostnameMatch = false
-        try {
-            const parsedUrl = new URL(normalizedPath)
-            hostnameMatch = ALLOWED_HOSTNAMES.includes(parsedUrl.hostname.toLowerCase())
-        } catch { hostnameMatch = false }
-
+        try { hostnameMatch = ALLOWED_HOSTNAMES.includes(new URL(normalizedPath).hostname.toLowerCase()) } catch {}
         if (patternMatch && hostnameMatch) {
-            return Response.redirect(
-                'https://' + urlObj.host + CONFIG.PREFIX + normalizedPath, 301
-            )
+            return Response.redirect('https://' + urlObj.host + CONFIG.PREFIX + normalizedPath, 301)
         }
-        return makeRes('Blocked: Invalid redirect target. Only GitHub URLs are allowed.', 403)
+        return makeRes('Blocked: Invalid redirect target.', 403)
     }
 
     let rawPath = urlObj.pathname
-    if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) {
-        rawPath = rawPath.slice(CONFIG.PREFIX.length)
-    }
+    if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) rawPath = rawPath.slice(CONFIG.PREFIX.length)
     path = rawPath.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
 
-    if (!path) {
-        return serveIndex()
-    }
+    if (!path) return serveIndex()
+    if (GITHUB_PATTERNS.some(p => p.test(path))) return proxyRequest(e, req, path)
 
-    if (GITHUB_PATTERNS.some(p => p.test(path))) {
-        return proxyRequest(e, req, path)
-    }
-
-    return makeRes(
-        JSON.stringify({
-            error: 'Not Found',
-            message: 'Only GitHub URLs are supported.',
-        }),
-        404,
-        { 'content-type': 'application/json; charset=utf-8' }
-    )
-}
-
-function buildCacheKey(pathname) {
-    const url = new URL(pathname.startsWith('http') ? pathname : `https://${pathname}`)
-    const NO_SIMPLIFY_PATTERNS = [
-        /^api\.github\.com$/,
-        /\/releases\/download\//,
-        /^gist\.(?:githubusercontent|github)\.com$/,
-        /\/actions\/runs\/\d+\/artifacts\//,
-    ]
-    if (NO_SIMPLIFY_PATTERNS.some(p => p.test(url.hostname) || p.test(url.pathname))) {
-        return new Request(url.href, { method: 'GET' });
-    }
-    const STABLE_PARAMS = ['ref', 'tag', 'branch', 'commit']
-    for (const key of [...url.searchParams.keys()]) {
-        if (!STABLE_PARAMS.includes(key)) url.searchParams.delete(key)
-    }
-    return new Request(url.href, { method: 'GET' })
+    return makeRes(JSON.stringify({ error: 'Not Found', message: 'Only GitHub URLs are supported.' }), 404, {
+        'content-type': 'application/json; charset=utf-8'
+    })
 }
 
 async function proxyRequest(e, req, pathname) {
-    const cacheKey = buildCacheKey(pathname)
-    const cache = caches.default
-    const dynamicCors = getDynamicCorsHeaders(req, pathname)
-    const isArtifact = isArtifactPath(pathname)
+    try {
+        const isArtifact = isArtifactPath(pathname)
 
-    if (isArtifactPath(pathname)) {
-        const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`;
-        const urlObj = newUrl(targetUrl);
-        if (!urlObj) return makeRes('Invalid target URL', 400);
+        // === ARTIFACT SPECIAL HANDLING ===
+        if (isArtifact) {
+            const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
+            const urlObj = newUrl(targetUrl)
+            if (!urlObj) return makeRes('Invalid target URL', 400)
 
-        const probeHeaders = new Headers(req.headers);
-        probeHeaders.delete('host');
-        probeHeaders.delete('content-length');
-        probeHeaders.delete('connection');
-        probeHeaders.delete('keep-alive');
+            // Try to resolve the real download URL via HEAD request
+            // This works for PUBLIC repos without auth
+            try {
+                const probeRes = await fetch(urlObj.href, {
+                    method: 'HEAD',
+                    headers: { 'User-Agent': 'Mozilla/5.0 CF-GH-Proxy' },
+                    redirect: 'manual',
+                    cf: { cacheEverything: false }
+                })
 
-        try {
-            const probeRes = await fetch(urlObj.href, {
-                method: 'HEAD',
-                headers: probeHeaders,
-                redirect: 'manual',
-                cf: { cacheEverything: false }
-            });
-
-            if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
-                const location = probeRes.headers.get('location');
-                if (location) {
-                    try {
-                        const nextUrl = new URL(location, urlObj.href);
-                        if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
-                            return new Response(null, {
-                                status: 302,
-                                headers: {
-                                    'Location': location,
-                                    'Access-Control-Allow-Origin': '*',
-                                    'X-Cache-Status': 'ARTIFACT-DIRECT',
-                                    'Cache-Control': 'no-store'
-                                }
-                            });
-                        }
-                    } catch (urlErr) {
-                        console.error('[Artifact URL Parse Error]', location, urlErr);
+                if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
+                    const location = probeRes.headers.get('location')
+                    if (location) {
+                        try {
+                            const nextUrl = new URL(location, urlObj.href)
+                            if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
+                                // Direct redirect to real download URL - saves bandwidth & avoids cookie issues
+                                return new Response(null, {
+                                    status: 302,
+                                    headers: {
+                                        'Location': location,
+                                        'Access-Control-Allow-Origin': '*',
+                                        'X-Accel-Redirect': location,
+                                        'Cache-Control': 'no-store, no-cache',
+                                    }
+                                })
+                            }
+                        } catch {}
                     }
                 }
-            }
-        } catch (err) {
-            console.error('[Artifact Direct Link Failed]', err);
-        }
-    }
-
-    if (req.method === 'GET' && !isArtifact) {
-        const cached = await cache.match(cacheKey)
-        if (cached) {
-            const clientEtag = req.headers.get('if-none-match')
-            const clientLastModified = req.headers.get('if-modified-since')
-            const cachedEtag = cached.headers.get('etag')
-            const cachedLastModified = cached.headers.get('last-modified')
-
-            if ((clientEtag && clientEtag === cachedEtag) ||
-                (clientLastModified && clientLastModified === cachedLastModified)) {
-                return new Response(null, {
-                    status: 304,
-                    headers: {
-                        ...dynamicCors,
-                        ...SECURITY_HEADERS,
-                        'etag': cachedEtag || '',
-                        'last-modified': cachedLastModified || '',
-                        'x-cache-status': 'HIT-304'
-                    }
-                })
+            } catch (probeErr) {
+                console.warn('Artifact probe failed:', probeErr)
             }
 
-            const hitHeaders = new Headers(cached.headers)
-            hitHeaders.set('x-cache-status', 'HIT')
-            for (const [k, v] of Object.entries(dynamicCors)) hitHeaders.set(k, v)
-            for (const [k, v] of Object.entries(SECURITY_HEADERS)) hitHeaders.set(k, v)
-            return new Response(cached.body, { status: cached.status, headers: hitHeaders })
+            // If probe failed (likely private repo or auth required), show helpful fallback page
+            return new Response(buildArtifactFallbackHTML(targetUrl), {
+                status: 200,
+                headers: {
+                    'content-type': 'text/html; charset=utf-8',
+                    ...CORS_HEADERS,
+                    ...SECURITY_HEADERS,
+                    'Cache-Control': 'no-store',
+                }
+            })
         }
-    }
+        // === END ARTIFACT HANDLING ===
 
-    const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
-    const urlObj = newUrl(targetUrl)
-    if (!urlObj) return makeRes('Invalid target URL', 400)
+        // Normal proxy logic for non-artifact resources
+        const cache = caches.default
+        const cacheKey = buildCacheKey(pathname)
+        const dynamicCors = getDynamicCorsHeaders(req, pathname)
 
-    const reqHdrNew = new Headers(req.headers)
-    if (!isArtifact) {
-        reqHdrNew.delete('cookie')
-        reqHdrNew.delete('authorization')
-    }
-    reqHdrNew.delete('host')
-
-    const rangeHeader = req.headers.get('range')
-    if (rangeHeader) {
-        reqHdrNew.set('range', rangeHeader)
-    }
-
-    const response = await handleProxyFetch(urlObj, {
-        method: req.method,
-        headers: reqHdrNew,
-        redirect: 'manual',
-        body: req.body,
-        cf: {
-            cacheEverything: true,
-            cacheTtlByStatus: isArtifact
-                ? { "200-299": 0, "301-399": 0, "404": 1 }
-                : { "200-299": CONFIG.CACHE_TTL, "404": 1 },
+        if (req.method === 'GET') {
+            const cached = await cache.match(cacheKey)
+            if (cached) {
+                const clientEtag = req.headers.get('if-none-match')
+                const cachedEtag = cached.headers.get('etag')
+                if (clientEtag && clientEtag === cachedEtag) {
+                    return new Response(null, { status: 304, headers: { ...dynamicCors, ...SECURITY_HEADERS, 'etag': cachedEtag, 'x-cache-status': 'HIT-304' } })
+                }
+                const hitHeaders = new Headers(cached.headers)
+                hitHeaders.set('x-cache-status', 'HIT')
+                for (const [k, v] of Object.entries(dynamicCors)) hitHeaders.set(k, v)
+                for (const [k, v] of Object.entries(SECURITY_HEADERS)) hitHeaders.set(k, v)
+                return new Response(cached.body, { status: cached.status, headers: hitHeaders })
+            }
         }
-    }, 0)
 
-    if (!response.ok && response.status !== 304 && response.status !== 206) {
-        const errorHeaders = new Headers(response.headers)
-        for (const [k, v] of Object.entries(dynamicCors)) errorHeaders.set(k, v)
-        for (const [k, v] of Object.entries(SECURITY_HEADERS)) errorHeaders.set(k, v)
-        return new Response(response.body, { status: response.status, headers: errorHeaders })
-    }
+        const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
+        const urlObj = newUrl(targetUrl)
+        if (!urlObj) return makeRes('Invalid target URL', 400)
 
-    if (req.method === 'GET' && !isArtifact && (response.status >= 200 && response.status < 400)) {
-        const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
-        const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
+        const reqHdrNew = new Headers(req.headers)
+        reqHdrNew.delete('cookie'); reqHdrNew.delete('authorization'); reqHdrNew.delete('host')
+        const rangeHeader = req.headers.get('range')
+        if (rangeHeader) reqHdrNew.set('range', rangeHeader)
 
-        const finalHeaders = new Headers(response.headers)
-        for (const [k, v] of Object.entries(dynamicCors)) finalHeaders.set(k, v)
-        for (const [k, v] of Object.entries(SECURITY_HEADERS)) finalHeaders.set(k, v)
+        const response = await handleProxyFetch(urlObj, {
+            method: req.method, headers: reqHdrNew, redirect: 'manual', body: req.body,
+            cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "404": 1 } }
+        }, 0)
 
-        if (shouldCache) {
-            finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
-            finalHeaders.set('x-cache-status', 'MISS')
-
-            const [forClient, forCache] = response.body.tee()
-
-            e.waitUntil(cache.put(cacheKey, new Response(forCache, {
-                status: response.status,
-                headers: finalHeaders
-            })))
-
-            return new Response(forClient, { status: response.status, headers: finalHeaders })
-        } else {
-            finalHeaders.set('x-cache-status', contentLength > CONFIG.MAX_CACHE_SIZE ? 'BYPASS-LARGE' : 'BYPASS')
-            return new Response(response.body, { status: response.status, headers: finalHeaders })
+        if (!response.ok && response.status !== 304 && response.status !== 206) {
+            const errHeaders = new Headers(response.headers)
+            for (const [k, v] of Object.entries(dynamicCors)) errHeaders.set(k, v)
+            for (const [k, v] of Object.entries(SECURITY_HEADERS)) errHeaders.set(k, v)
+            return new Response(response.body, { status: response.status, headers: errHeaders })
         }
-    }
 
-    const missHeaders = new Headers(response.headers)
-    missHeaders.set('x-cache-status', isArtifact ? 'BYPASS-ARTIFACT' : 'BYPASS')
-    for (const [k, v] of Object.entries(dynamicCors)) missHeaders.set(k, v)
-    for (const [k, v] of Object.entries(SECURITY_HEADERS)) missHeaders.set(k, v)
-    return new Response(response.body, { status: response.status, headers: missHeaders })
+        if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
+            const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
+            const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
+            const finalHeaders = new Headers(response.headers)
+            for (const [k, v] of Object.entries(dynamicCors)) finalHeaders.set(k, v)
+            for (const [k, v] of Object.entries(SECURITY_HEADERS)) finalHeaders.set(k, v)
+
+            if (shouldCache && response.body) {
+                finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
+                finalHeaders.set('x-cache-status', 'MISS')
+                try {
+                    const [forClient, forCache] = response.body.tee()
+                    e.waitUntil(cache.put(cacheKey, new Response(forCache, { status: response.status, headers: finalHeaders })))
+                    return new Response(forClient, { status: response.status, headers: finalHeaders })
+                } catch (teeErr) {
+                    console.error('Tee failed:', teeErr)
+                    finalHeaders.set('x-cache-status', 'BYPASS-TEE-ERROR')
+                    return new Response(response.body, { status: response.status, headers: finalHeaders })
+                }
+            } else {
+                finalHeaders.set('x-cache-status', contentLength > CONFIG.MAX_CACHE_SIZE ? 'BYPASS-LARGE' : 'BYPASS')
+                return new Response(response.body, { status: response.status, headers: finalHeaders })
+            }
+        }
+
+        const missHeaders = new Headers(response.headers)
+        missHeaders.set('x-cache-status', 'BYPASS')
+        for (const [k, v] of Object.entries(dynamicCors)) missHeaders.set(k, v)
+        for (const [k, v] of Object.entries(SECURITY_HEADERS)) missHeaders.set(k, v)
+        return new Response(response.body, { status: response.status, headers: missHeaders })
+    } catch (err) {
+        console.error('Proxy Error:', err)
+        return makeErrorRes(err)
+    }
+}
+
+function buildCacheKey(pathname) {
+    try {
+        const url = newUrl(pathname)
+        if (!url) throw new Error('Invalid URL')
+        const NO_SIMPLIFY = [/^api\.github\.com$/, /\/releases\/download\//, /^gist\.(?:githubusercontent|github)\.com$/, /\/actions\/runs\/\d+\/artifacts\//]
+        if (NO_SIMPLIFY.some(p => p.test(url.hostname) || p.test(url.pathname))) return new Request(url.href, { method: 'GET' })
+        const STABLE = ['ref', 'tag', 'branch', 'commit']
+        for (const key of [...url.searchParams.keys()]) { if (!STABLE.includes(key)) url.searchParams.delete(key) }
+        return new Request(url.href, { method: 'GET' })
+    } catch { return new Request(`https://fallback.invalid/${pathname}`, { method: 'GET' }) }
+}
+
+function getDynamicCorsHeaders(req, targetUrl) {
+    try {
+        const url = newUrl(targetUrl)
+        if (url && (url.hostname === 'api.github.com' || url.searchParams.has('token'))) {
+            const origin = req.headers.get('origin')
+            if (origin) return { 'access-control-allow-origin': origin, 'access-control-expose-headers': '*', 'vary': 'Origin' }
+            return { 'access-control-expose-headers': '*' }
+        }
+    } catch {}
+    return { ...CORS_HEADERS }
 }
 
 async function handleProxyFetch(urlObj, init, redirectCount) {
     if (redirectCount > 5) return makeRes('Too many redirects', 508)
     try {
         const res = await fetch(urlObj.href, init)
-
         if ([301, 302, 303, 307, 308].includes(res.status)) {
             const location = res.headers.get('location')
             if (!location) return res
-
             const nextUrl = new URL(location, urlObj.href)
-
-            if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) ||
-                GITHUB_PATTERNS.some(p => p.test(nextUrl.href)) ||
-                isSafeAzureRedirect(nextUrl.hostname)) {
+            if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || GITHUB_PATTERNS.some(p => p.test(nextUrl.href)) || isSafeAzureRedirect(nextUrl.hostname)) {
                 return handleProxyFetch(nextUrl, init, redirectCount + 1)
-            } else {
-                const safeHeaders = new Headers(res.headers)
-                safeHeaders.delete('set-cookie')
-                safeHeaders.set('access-control-expose-headers', '*')
-                for (const [k, v] of Object.entries(SECURITY_HEADERS)) safeHeaders.set(k, v)
-                return new Response(null, { status: res.status, headers: safeHeaders })
             }
+            const safeHeaders = new Headers(res.headers)
+            safeHeaders.delete('set-cookie')
+            safeHeaders.set('access-control-expose-headers', '*')
+            for (const [k, v] of Object.entries(SECURITY_HEADERS)) safeHeaders.set(k, v)
+            return new Response(null, { status: res.status, headers: safeHeaders })
         }
-
         const resHdrNew = new Headers(res.headers)
-        resHdrNew.delete('content-security-policy')
-        resHdrNew.delete('clear-site-data')
-        resHdrNew.delete('x-frame-options')
+        resHdrNew.delete('content-security-policy'); resHdrNew.delete('clear-site-data'); resHdrNew.delete('x-frame-options')
+        return new Response(res.body, { status: res.status, headers: resHdrNew })
+    } catch (err) { return makeRes('Proxy Error: ' + err.message, 502) }
+}
 
-        return new Response(res.body, {
-            status: res.status,
-            headers: resHdrNew
-        })
-    } catch (err) {
-        return makeRes('Proxy Error: ' + err.message, 502)
-    }
+function buildArtifactFallbackHTML(originalUrl) {
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Artifact 下载提示</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1117;color:#c9d1d9;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px}
+.card{max-width:600px;width:100%;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;text-align:center}
+.icon{font-size:48px;margin-bottom:16px}
+h1{font-size:1.5rem;margin-bottom:12px;color:#f0f6fc}
+p{line-height:1.6;margin-bottom:20px;color:#8b949e;font-size:0.95rem}
+.btn{display:inline-block;padding:12px 24px;background:#238636;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;transition:background .2s}
+.btn:hover{background:#2ea043}
+.btn-secondary{background:#21262d;border:1px solid #30363d;margin-left:12px}
+.btn-secondary:hover{background:#30363d}
+.note{margin-top:24px;padding:16px;background:#1c2128;border-radius:8px;font-size:0.85rem;color:#8b949e;text-align:left;line-height:1.5}
+code{background:#1c2128;padding:2px 6px;border-radius:4px;font-size:0.85rem;color:#79c0ff;word-break:break-all}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="icon">⚠️</div>
+<h1>Artifact 需要 GitHub 登录</h1>
+<p>GitHub Actions Artifacts 要求用户登录后才能下载。<br>由于浏览器安全策略，代理无法获取您的 GitHub 登录状态。</p>
+<div>
+<a class="btn" href="${originalUrl}" target="_blank" rel="noopener">前往 GitHub 下载</a>
+<button class="btn btn-secondary" onclick="navigator.clipboard.writeText('${originalUrl}').then(()=>this.textContent='已复制 ✓')">复制链接</button>
+</div>
+<div class="note">
+<strong>💡 为什么不能直接代理下载？</strong><br>
+GitHub 的 Artifact 下载链接绑定了您的浏览器 Session Cookie。当您通过代理访问时，浏览器不会将 github.com 的 Cookie 发送给代理域名，导致 GitHub 拒绝请求。这是浏览器的安全机制，无法绕过。<br><br>
+<strong>建议：</strong>直接在 GitHub 页面点击下载，或使用 <code>gh run download</code> CLI 命令。
+</div>
+</div>
+</body>
+</html>`
 }
 
 function serveIndex() {
@@ -470,7 +417,6 @@ function serveIndex() {
                 <p>📂 https://github.com/user/repo/releases/download/v1.0/file.zip</p>
                 <p>💾 https://github.com/user/repo/blob/main/README.md</p>
                 <p>📝 https://github.com/user/repo/raw/main/src/index.js</p>
-                <p>⏩ https://github.com/user/repo/actions/runs/123456/artifacts/789012</p>
                 <p>📥 https://github.com/user/repo/actions/runs/123456/artifacts/789012/zip</p>
                 <p>🌐 https://raw.githubusercontent.com/user/repo/main/file.txt</p>
                 <p>🌐 https://raw.github.com/user/repo/main/file.txt</p>
