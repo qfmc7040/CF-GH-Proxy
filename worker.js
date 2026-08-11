@@ -2,10 +2,10 @@
 
 const CONFIG = {
     PREFIX: '/',
-    CACHE_TTL: 86400, // 24 hours
-    MAX_CACHE_SIZE: 10 * 1024 * 1024, // Reduced to 10MB to prevent memory issues with tee()
-    RATE_LIMIT_WINDOW: 60, // Increased window to 60s for smoother limiting
-    RATE_LIMIT_MAX: 100, // Increased limit slightly
+    CACHE_TTL: 86400,
+    MAX_CACHE_SIZE: 10 * 1024 * 1024,
+    RATE_LIMIT_WINDOW: 60,
+    RATE_LIMIT_MAX: 100,
     IS_PRODUCTION: true,
     MAX_REDIRECTS: 5,
 }
@@ -41,8 +41,6 @@ const ALLOWED_HOSTNAMES = new Set([
     'actions.githubusercontent.com',
 ])
 
-// Fixed syntax error: Added comment slashes
-// Pre-compiled regex for cache key simplification check
 const NO_SIMPLIFY_REGEX = [
     /^api\.github\.com$/,
     /\/releases\/download\//,
@@ -143,7 +141,6 @@ async function checkRateLimit(req, event) {
             }
         }
         
-        // Fire and forget update
         event.waitUntil(cache.put(cacheReq, new Response(String(currentCount + 1), {
             headers: { 'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}` }
         })))
@@ -300,7 +297,6 @@ async function proxyRequest(e, req, pathname) {
 
         if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
             const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
-            // Only cache if size is within limits and not zero
             const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
             
             const finalHeaders = new Headers(response.headers)
