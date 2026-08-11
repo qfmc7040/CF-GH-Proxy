@@ -2,10 +2,10 @@
 
 const CONFIG = {
     PREFIX: '/',
-    CACHE_TTL: 86400,
-    MAX_CACHE_SIZE: 50 * 1024 * 1024,
-    RATE_LIMIT_WINDOW: 30,
-    RATE_LIMIT_MAX: 50,
+    CACHE_TTL: 604800,
+    MAX_CACHE_SIZE: 100 * 1024 * 1024,
+    RATE_LIMIT_WINDOW: 60,
+    RATE_LIMIT_MAX: 100,
     IS_PRODUCTION: true,
 }
 
@@ -23,10 +23,14 @@ const GITHUB_PATTERNS = [
 ]
 
 const SAFE_REDIRECT_HOSTS = new Set([
-    'objects.githubusercontent.com', 'github-releases.githubusercontent.com',
-    'release-assets.githubusercontent.com', 'raw.githubusercontent.com',
-    'gist.githubusercontent.com', 'codeload.github.com',
-    'github.githubassets.com', 'copilot.githubusercontent.com',
+    'objects.githubusercontent.com', 
+    'github-releases.githubusercontent.com',
+    'release-assets.githubusercontent.com', 
+    'raw.githubusercontent.com',
+    'gist.githubusercontent.com', 
+    'codeload.github.com',
+    'github.githubassets.com', 
+    'copilot.githubusercontent.com',
     'actions.githubusercontent.com',
 ])
 
@@ -53,7 +57,9 @@ const CORS_HEADERS = {
 
 const PREFLIGHT_RESP = new Response(null, {
     status: 204,
-    headers: { ...CORS_HEADERS, ...SECURITY_HEADERS,
+    headers: { 
+        ...CORS_HEADERS, 
+        ...SECURITY_HEADERS,
         'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS',
         'access-control-allow-headers': 'Content-Type, Authorization, Accept, X-Requested-With',
         'access-control-max-age': '1728000',
@@ -61,19 +67,31 @@ const PREFLIGHT_RESP = new Response(null, {
 })
 
 function makeRes(body, status = 200, headers = {}) {
-    return new Response(body, { status, headers: { ...CORS_HEADERS, ...SECURITY_HEADERS, ...headers } })
+    return new Response(body, { 
+        status, 
+        headers: { 
+            ...CORS_HEADERS, 
+            ...SECURITY_HEADERS, 
+            ...headers 
+        } 
+    })
 }
 
 function makeErrorRes(err) {
     console.error('[Worker Error]', err)
-    return makeRes(CONFIG.IS_PRODUCTION ? 'Internal Server Error' : (err.stack || err.message), CONFIG.IS_PRODUCTION ? 500 : 502)
+    return makeRes(
+        CONFIG.IS_PRODUCTION ? 'Internal Server Error' : (err.stack || err.message), 
+        CONFIG.IS_PRODUCTION ? 500 : 502
+    )
 }
 
 function newUrl(urlStr) {
     try {
         if (!urlStr.startsWith('http')) urlStr = 'https://' + urlStr
         return new URL(urlStr)
-    } catch { return null }
+    } catch { 
+        return null 
+    }
 }
 
 function isArtifactPath(pathname) {
@@ -91,23 +109,30 @@ async function checkRateLimit(req, event) {
         const windowKey = `rl:${ip}:${Math.floor(now / CONFIG.RATE_LIMIT_WINDOW)}`
         const cacheKey = `https://cache.internal/rate-limit/${windowKey}`
         const cache = caches.default
+        
         let currentCount = 0
         const cacheReq = new Request(cacheKey, { method: 'GET' })
         const cached = await cache.match(cacheReq)
+        
         if (cached) {
             currentCount = parseInt(await cached.text(), 10) || 0
             if (currentCount >= CONFIG.RATE_LIMIT_MAX) {
                 const retryAfter = (Math.floor(now / CONFIG.RATE_LIMIT_WINDOW) + 1) * CONFIG.RATE_LIMIT_WINDOW - now
                 return makeRes(JSON.stringify({ error: 'Rate limit exceeded', retry_after: retryAfter }), 429, {
-                    'content-type': 'application/json; charset=utf-8', 'retry-after': String(retryAfter),
+                    'content-type': 'application/json; charset=utf-8', 
+                    'retry-after': String(retryAfter),
                 })
             }
         }
+        
         event.waitUntil(cache.put(cacheReq, new Response(String(currentCount + 1), {
             headers: { 'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}` }
         })))
         return null
-    } catch (e) { console.warn('Rate limit bypass:', e); return null }
+    } catch (e) { 
+        console.warn('Rate limit bypass:', e); 
+        return null 
+    }
 }
 
 addEventListener('fetch', e => {
@@ -117,17 +142,22 @@ addEventListener('fetch', e => {
 async function fetchHandler(e) {
     const req = e.request
     const urlObj = new URL(req.url)
+    
     if (req.method === 'OPTIONS') return PREFLIGHT_RESP
 
     const rateLimited = await checkRateLimit(req, e)
     if (rateLimited) return rateLimited
 
     let path = urlObj.searchParams.get('q')
+    
     if (path) {
         const normalizedPath = path.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
         const patternMatch = GITHUB_PATTERNS.some(p => p.test(normalizedPath))
         let hostnameMatch = false
-        try { hostnameMatch = ALLOWED_HOSTNAMES.includes(new URL(normalizedPath).hostname.toLowerCase()) } catch {}
+        try { 
+            hostnameMatch = ALLOWED_HOSTNAMES.includes(new URL(normalizedPath).hostname.toLowerCase()) 
+        } catch {}
+        
         if (patternMatch && hostnameMatch) {
             return Response.redirect('https://' + urlObj.host + CONFIG.PREFIX + normalizedPath, 301)
         }
@@ -135,11 +165,16 @@ async function fetchHandler(e) {
     }
 
     let rawPath = urlObj.pathname
-    if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) rawPath = rawPath.slice(CONFIG.PREFIX.length)
+    if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) {
+        rawPath = rawPath.slice(CONFIG.PREFIX.length)
+    }
     path = rawPath.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
 
     if (!path) return serveIndex()
-    if (GITHUB_PATTERNS.some(p => p.test(path))) return proxyRequest(e, req, path)
+    
+    if (GITHUB_PATTERNS.some(p => p.test(path))) {
+        return proxyRequest(e, req, path)
+    }
 
     return makeRes(JSON.stringify({ error: 'Not Found', message: 'Only GitHub URLs are supported.' }), 404, {
         'content-type': 'application/json; charset=utf-8'
@@ -149,15 +184,13 @@ async function fetchHandler(e) {
 async function proxyRequest(e, req, pathname) {
     try {
         const isArtifact = isArtifactPath(pathname)
+        const isReleaseAsset = /\/releases\/download\//.test(pathname) || /\/archive\//.test(pathname)
 
-        // === ARTIFACT SPECIAL HANDLING ===
         if (isArtifact) {
             const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
             const urlObj = newUrl(targetUrl)
             if (!urlObj) return makeRes('Invalid target URL', 400)
 
-            // Try to resolve the real download URL via HEAD request
-            // This works for PUBLIC repos without auth
             try {
                 const probeRes = await fetch(urlObj.href, {
                     method: 'HEAD',
@@ -172,13 +205,11 @@ async function proxyRequest(e, req, pathname) {
                         try {
                             const nextUrl = new URL(location, urlObj.href)
                             if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
-                                // Direct redirect to real download URL - saves bandwidth & avoids cookie issues
                                 return new Response(null, {
                                     status: 302,
                                     headers: {
                                         'Location': location,
                                         'Access-Control-Allow-Origin': '*',
-                                        'X-Accel-Redirect': location,
                                         'Cache-Control': 'no-store, no-cache',
                                     }
                                 })
@@ -190,7 +221,6 @@ async function proxyRequest(e, req, pathname) {
                 console.warn('Artifact probe failed:', probeErr)
             }
 
-            // If probe failed (likely private repo or auth required), show helpful fallback page
             return new Response(buildArtifactFallbackHTML(targetUrl), {
                 status: 200,
                 headers: {
@@ -201,9 +231,37 @@ async function proxyRequest(e, req, pathname) {
                 }
             })
         }
-        // === END ARTIFACT HANDLING ===
 
-        // Normal proxy logic for non-artifact resources
+        if (isReleaseAsset) {
+             const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
+             try {
+                 const headRes = await fetch(targetUrl, {
+                     method: 'HEAD',
+                     redirect: 'manual',
+                     headers: { 'User-Agent': 'Mozilla/5.0' }
+                 });
+                 
+                 if ([301, 302, 303, 307, 308].includes(headRes.status)) {
+                     const location = headRes.headers.get('location');
+                     if (location) {
+                         const locUrl = new URL(location, targetUrl);
+                         if (SAFE_REDIRECT_HOSTS.has(locUrl.hostname) || isSafeAzureRedirect(locUrl.hostname)) {
+                             return new Response(null, {
+                                 status: 302,
+                                 headers: {
+                                     'Location': location,
+                                     'Access-Control-Allow-Origin': '*',
+                                     'Cache-Control': 'public, max-age=3600'
+                                 }
+                             });
+                         }
+                     }
+                 }
+             } catch (e) {
+                 console.log("Redirect probe failed, falling back to proxy", e);
+             }
+        }
+
         const cache = caches.default
         const cacheKey = buildCacheKey(pathname)
         const dynamicCors = getDynamicCorsHeaders(req, pathname)
@@ -213,14 +271,28 @@ async function proxyRequest(e, req, pathname) {
             if (cached) {
                 const clientEtag = req.headers.get('if-none-match')
                 const cachedEtag = cached.headers.get('etag')
+                
                 if (clientEtag && clientEtag === cachedEtag) {
-                    return new Response(null, { status: 304, headers: { ...dynamicCors, ...SECURITY_HEADERS, 'etag': cachedEtag, 'x-cache-status': 'HIT-304' } })
+                    return new Response(null, { 
+                        status: 304, 
+                        headers: { 
+                            ...dynamicCors, 
+                            ...SECURITY_HEADERS, 
+                            'etag': cachedEtag, 
+                            'x-cache-status': 'HIT-304' 
+                        } 
+                    })
                 }
+                
                 const hitHeaders = new Headers(cached.headers)
                 hitHeaders.set('x-cache-status', 'HIT')
                 for (const [k, v] of Object.entries(dynamicCors)) hitHeaders.set(k, v)
                 for (const [k, v] of Object.entries(SECURITY_HEADERS)) hitHeaders.set(k, v)
-                return new Response(cached.body, { status: cached.status, headers: hitHeaders })
+                
+                return new Response(cached.body, { 
+                    status: cached.status, 
+                    headers: hitHeaders 
+                })
             }
         }
 
@@ -229,13 +301,26 @@ async function proxyRequest(e, req, pathname) {
         if (!urlObj) return makeRes('Invalid target URL', 400)
 
         const reqHdrNew = new Headers(req.headers)
-        reqHdrNew.delete('cookie'); reqHdrNew.delete('authorization'); reqHdrNew.delete('host')
+        reqHdrNew.delete('cookie')
+        reqHdrNew.delete('authorization')
+        reqHdrNew.delete('host')
+        
         const rangeHeader = req.headers.get('range')
         if (rangeHeader) reqHdrNew.set('range', rangeHeader)
 
         const response = await handleProxyFetch(urlObj, {
-            method: req.method, headers: reqHdrNew, redirect: 'manual', body: req.body,
-            cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "404": 1 } }
+            method: req.method, 
+            headers: reqHdrNew, 
+            redirect: 'manual', 
+            body: req.body,
+            cf: { 
+                cacheEverything: true, 
+                cacheTtlByStatus: { 
+                    "200-299": CONFIG.CACHE_TTL, 
+                    "301-308": 3600,
+                    "404": 60 
+                } 
+            }
         }, 0)
 
         if (!response.ok && response.status !== 304 && response.status !== 206) {
@@ -248,25 +333,43 @@ async function proxyRequest(e, req, pathname) {
         if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
             const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
             const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
+            
             const finalHeaders = new Headers(response.headers)
             for (const [k, v] of Object.entries(dynamicCors)) finalHeaders.set(k, v)
             for (const [k, v] of Object.entries(SECURITY_HEADERS)) finalHeaders.set(k, v)
 
+            finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}, immutable`)
+
             if (shouldCache && response.body) {
-                finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
                 finalHeaders.set('x-cache-status', 'MISS')
                 try {
                     const [forClient, forCache] = response.body.tee()
-                    e.waitUntil(cache.put(cacheKey, new Response(forCache, { status: response.status, headers: finalHeaders })))
-                    return new Response(forClient, { status: response.status, headers: finalHeaders })
+                    
+                    e.waitUntil(
+                        cache.put(cacheKey, new Response(forCache, { 
+                            status: response.status, 
+                            headers: finalHeaders 
+                        }))
+                    )
+                    
+                    return new Response(forClient, { 
+                        status: response.status, 
+                        headers: finalHeaders 
+                    })
                 } catch (teeErr) {
                     console.error('Tee failed:', teeErr)
                     finalHeaders.set('x-cache-status', 'BYPASS-TEE-ERROR')
-                    return new Response(response.body, { status: response.status, headers: finalHeaders })
+                    return new Response(response.body, { 
+                        status: response.status, 
+                        headers: finalHeaders 
+                    })
                 }
             } else {
                 finalHeaders.set('x-cache-status', contentLength > CONFIG.MAX_CACHE_SIZE ? 'BYPASS-LARGE' : 'BYPASS')
-                return new Response(response.body, { status: response.status, headers: finalHeaders })
+                return new Response(response.body, { 
+                    status: response.status, 
+                    headers: finalHeaders 
+                })
             }
         }
 
@@ -275,6 +378,7 @@ async function proxyRequest(e, req, pathname) {
         for (const [k, v] of Object.entries(dynamicCors)) missHeaders.set(k, v)
         for (const [k, v] of Object.entries(SECURITY_HEADERS)) missHeaders.set(k, v)
         return new Response(response.body, { status: response.status, headers: missHeaders })
+        
     } catch (err) {
         console.error('Proxy Error:', err)
         return makeErrorRes(err)
@@ -285,12 +389,27 @@ function buildCacheKey(pathname) {
     try {
         const url = newUrl(pathname)
         if (!url) throw new Error('Invalid URL')
-        const NO_SIMPLIFY = [/^api\.github\.com$/, /\/releases\/download\//, /^gist\.(?:githubusercontent|github)\.com$/, /\/actions\/runs\/\d+\/artifacts\//]
-        if (NO_SIMPLIFY.some(p => p.test(url.hostname) || p.test(url.pathname))) return new Request(url.href, { method: 'GET' })
+        
+        const NO_SIMPLIFY = [
+            /^api\.github\.com$/, 
+            /\/releases\/download\//, 
+            /^gist\.(?:githubusercontent|github)\.com$/, 
+            /\/actions\/runs\/\d+\/artifacts\//
+        ]
+        
+        if (NO_SIMPLIFY.some(p => p.test(url.hostname) || p.test(url.pathname))) {
+            return new Request(url.href, { method: 'GET' })
+        }
+        
         const STABLE = ['ref', 'tag', 'branch', 'commit']
-        for (const key of [...url.searchParams.keys()]) { if (!STABLE.includes(key)) url.searchParams.delete(key) }
+        for (const key of [...url.searchParams.keys()]) { 
+            if (!STABLE.includes(key)) url.searchParams.delete(key) 
+        }
+        
         return new Request(url.href, { method: 'GET' })
-    } catch { return new Request(`https://fallback.invalid/${pathname}`, { method: 'GET' }) }
+    } catch { 
+        return new Request(`https://fallback.invalid/${pathname}`, { method: 'GET' }) 
+    }
 }
 
 function getDynamicCorsHeaders(req, targetUrl) {
@@ -298,7 +417,11 @@ function getDynamicCorsHeaders(req, targetUrl) {
         const url = newUrl(targetUrl)
         if (url && (url.hostname === 'api.github.com' || url.searchParams.has('token'))) {
             const origin = req.headers.get('origin')
-            if (origin) return { 'access-control-allow-origin': origin, 'access-control-expose-headers': '*', 'vary': 'Origin' }
+            if (origin) return { 
+                'access-control-allow-origin': origin, 
+                'access-control-expose-headers': '*', 
+                'vary': 'Origin' 
+            }
             return { 'access-control-expose-headers': '*' }
         }
     } catch {}
@@ -309,23 +432,34 @@ async function handleProxyFetch(urlObj, init, redirectCount) {
     if (redirectCount > 5) return makeRes('Too many redirects', 508)
     try {
         const res = await fetch(urlObj.href, init)
+        
         if ([301, 302, 303, 307, 308].includes(res.status)) {
             const location = res.headers.get('location')
             if (!location) return res
+            
             const nextUrl = new URL(location, urlObj.href)
+            
             if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || GITHUB_PATTERNS.some(p => p.test(nextUrl.href)) || isSafeAzureRedirect(nextUrl.hostname)) {
                 return handleProxyFetch(nextUrl, init, redirectCount + 1)
             }
+            
             const safeHeaders = new Headers(res.headers)
             safeHeaders.delete('set-cookie')
             safeHeaders.set('access-control-expose-headers', '*')
             for (const [k, v] of Object.entries(SECURITY_HEADERS)) safeHeaders.set(k, v)
+            
             return new Response(null, { status: res.status, headers: safeHeaders })
         }
+        
         const resHdrNew = new Headers(res.headers)
-        resHdrNew.delete('content-security-policy'); resHdrNew.delete('clear-site-data'); resHdrNew.delete('x-frame-options')
+        resHdrNew.delete('content-security-policy')
+        resHdrNew.delete('clear-site-data')
+        resHdrNew.delete('x-frame-options')
+        
         return new Response(res.body, { status: res.status, headers: resHdrNew })
-    } catch (err) { return makeRes('Proxy Error: ' + err.message, 502) }
+    } catch (err) { 
+        return makeRes('Proxy Error: ' + err.message, 502) 
+    }
 }
 
 function buildArtifactFallbackHTML(originalUrl) {
@@ -440,6 +574,10 @@ function serveIndex() {
 </html>`
     return new Response(html, {
         status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8', ...CORS_HEADERS, ...SECURITY_HEADERS }
+        headers: { 
+            'content-type': 'text/html; charset=utf-8', 
+            ...CORS_HEADERS, 
+            ...SECURITY_HEADERS 
+        }
     })
 }
