@@ -150,14 +150,11 @@ async function proxyRequest(e, req, pathname) {
     try {
         const isArtifact = isArtifactPath(pathname)
 
-        // === ARTIFACT SPECIAL HANDLING ===
         if (isArtifact) {
             const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
             const urlObj = newUrl(targetUrl)
             if (!urlObj) return makeRes('Invalid target URL', 400)
 
-            // Try to resolve the real download URL via HEAD request
-            // This works for PUBLIC repos without auth
             try {
                 const probeRes = await fetch(urlObj.href, {
                     method: 'HEAD',
@@ -172,7 +169,6 @@ async function proxyRequest(e, req, pathname) {
                         try {
                             const nextUrl = new URL(location, urlObj.href)
                             if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
-                                // Direct redirect to real download URL - saves bandwidth & avoids cookie issues
                                 return new Response(null, {
                                     status: 302,
                                     headers: {
@@ -190,7 +186,6 @@ async function proxyRequest(e, req, pathname) {
                 console.warn('Artifact probe failed:', probeErr)
             }
 
-            // If probe failed (likely private repo or auth required), show helpful fallback page
             return new Response(buildArtifactFallbackHTML(targetUrl), {
                 status: 200,
                 headers: {
@@ -201,9 +196,7 @@ async function proxyRequest(e, req, pathname) {
                 }
             })
         }
-        // === END ARTIFACT HANDLING ===
 
-        // Normal proxy logic for non-artifact resources
         const cache = caches.default
         const cacheKey = buildCacheKey(pathname)
         const dynamicCors = getDynamicCorsHeaders(req, pathname)
