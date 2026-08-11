@@ -2,12 +2,11 @@
 
 const CONFIG = {
     PREFIX: '/',
-    CACHE_TTL: 3600,
-    MAX_CACHE_SIZE: 100 * 1024 * 1024,
-    RATE_LIMIT_WINDOW: 60,
-    RATE_LIMIT_MAX: 100,
+    CACHE_TTL: 86400,
+    MAX_CACHE_SIZE: 50 * 1024 * 1024,
+    RATE_LIMIT_WINDOW: 30,
+    RATE_LIMIT_MAX: 50,
     IS_PRODUCTION: true,
-    FAKE_UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
 }
 
 const GITHUB_PATTERNS = [
@@ -85,10 +84,6 @@ function isSafeAzureRedirect(hostname) {
     return AZURE_BLOB_SUFFIXES.some(suffix => hostname.endsWith(suffix))
 }
 
-function isDirectRedirectable(pathname) {
-    return false
-}
-
 async function checkRateLimit(req, event) {
     try {
         const ip = req.headers.get('cf-connecting-ip') || 'unknown'
@@ -154,17 +149,19 @@ async function fetchHandler(e) {
 async function proxyRequest(e, req, pathname) {
     try {
         const isArtifact = isArtifactPath(pathname)
-        const shouldDirectRedirect = isDirectRedirectable(pathname)
 
+        // === ARTIFACT SPECIAL HANDLING ===
         if (isArtifact) {
             const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
             const urlObj = newUrl(targetUrl)
             if (!urlObj) return makeRes('Invalid target URL', 400)
 
+            // Try to resolve the real download URL via HEAD request
+            // This works for PUBLIC repos without auth
             try {
                 const probeRes = await fetch(urlObj.href, {
                     method: 'HEAD',
-                    headers: { 'User-Agent': CONFIG.FAKE_UA },
+                    headers: { 'User-Agent': 'Mozilla/5.0 CF-GH-Proxy' },
                     redirect: 'manual',
                     cf: { cacheEverything: false }
                 })
@@ -175,11 +172,13 @@ async function proxyRequest(e, req, pathname) {
                         try {
                             const nextUrl = new URL(location, urlObj.href)
                             if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
+                                // Direct redirect to real download URL - saves bandwidth & avoids cookie issues
                                 return new Response(null, {
                                     status: 302,
                                     headers: {
                                         'Location': location,
                                         'Access-Control-Allow-Origin': '*',
+                                        'X-Accel-Redirect': location,
                                         'Cache-Control': 'no-store, no-cache',
                                     }
                                 })
@@ -191,6 +190,7 @@ async function proxyRequest(e, req, pathname) {
                 console.warn('Artifact probe failed:', probeErr)
             }
 
+            // If probe failed (likely private repo or auth required), show helpful fallback page
             return new Response(buildArtifactFallbackHTML(targetUrl), {
                 status: 200,
                 headers: {
@@ -201,41 +201,9 @@ async function proxyRequest(e, req, pathname) {
                 }
             })
         }
+        // === END ARTIFACT HANDLING ===
 
-        if (shouldDirectRedirect) {
-            const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
-            try {
-                const headRes = await fetch(targetUrl, {
-                    method: 'HEAD',
-                    redirect: 'manual',
-                    headers: { 
-                        'User-Agent': CONFIG.FAKE_UA,
-                        'Accept': '*/*',
-                    }
-                });
-                
-                if ([301, 302, 303, 307, 308].includes(headRes.status)) {
-                    const location = headRes.headers.get('location');
-                    if (location) {
-                        const locUrl = new URL(location, targetUrl);
-                        if (SAFE_REDIRECT_HOSTS.has(locUrl.hostname) || isSafeAzureRedirect(locUrl.hostname)) {
-                            return new Response(null, {
-                                status: 302,
-                                headers: {
-                                    'Location': location,
-                                    'Access-Control-Allow-Origin': '*',
-                                    'Cache-Control': 'public, max-age=3600',
-                                    'X-Accel-Redirect': location,
-                                }
-                            });
-                        }
-                    }
-                }
-            } catch (e) {
-                console.log("Direct redirect probe failed, falling back to proxy", e);
-            }
-        }
-
+        // Normal proxy logic for non-artifact resources
         const cache = caches.default
         const cacheKey = buildCacheKey(pathname)
         const dynamicCors = getDynamicCorsHeaders(req, pathname)
@@ -262,15 +230,12 @@ async function proxyRequest(e, req, pathname) {
 
         const reqHdrNew = new Headers(req.headers)
         reqHdrNew.delete('cookie'); reqHdrNew.delete('authorization'); reqHdrNew.delete('host')
-        reqHdrNew.set('User-Agent', CONFIG.FAKE_UA)
-        reqHdrNew.set('Accept', '*/*')
-        
         const rangeHeader = req.headers.get('range')
         if (rangeHeader) reqHdrNew.set('range', rangeHeader)
 
         const response = await handleProxyFetch(urlObj, {
             method: req.method, headers: reqHdrNew, redirect: 'manual', body: req.body,
-            cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "404": 60 } }
+            cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "404": 1 } }
         }, 0)
 
         if (!response.ok && response.status !== 304 && response.status !== 206) {
@@ -288,7 +253,7 @@ async function proxyRequest(e, req, pathname) {
             for (const [k, v] of Object.entries(SECURITY_HEADERS)) finalHeaders.set(k, v)
 
             if (shouldCache && response.body) {
-                finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}, immutable`)
+                finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
                 finalHeaders.set('x-cache-status', 'MISS')
                 try {
                     const [forClient, forCache] = response.body.tee()
