@@ -149,41 +149,62 @@ async function fetchHandler(e) {
 async function proxyRequest(e, req, pathname) {
     try {
         const isArtifact = isArtifactPath(pathname)
+        const reqUrlObj = new URL(req.url)
 
         if (isArtifact) {
             const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
-            const urlObj = newUrl(targetUrl)
-            if (!urlObj) return makeRes('Invalid target URL', 400)
+            const targetUrlObj = newUrl(targetUrl)
+            if (!targetUrlObj) return makeRes('Invalid target URL', 400)
 
-            try {
-                const probeRes = await fetch(urlObj.href, {
-                    method: 'HEAD',
-                    headers: { 'User-Agent': 'Mozilla/5.0 CF-GH-Proxy' },
-                    redirect: 'manual',
-                    cf: { cacheEverything: false }
-                })
+            let token = reqUrlObj.searchParams.get('token')
+            if (!token) {
+                const authHeader = req.headers.get('authorization')
+                if (authHeader) {
+                    token = authHeader.replace(/^(Bearer|token)\s+/i, '')
+                }
+            }
 
-                if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
-                    const location = probeRes.headers.get('location')
-                    if (location) {
-                        try {
-                            const nextUrl = new URL(location, urlObj.href)
-                            if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
-                                return new Response(null, {
-                                    status: 302,
-                                    headers: {
-                                        'Location': location,
-                                        'Access-Control-Allow-Origin': '*',
-                                        'X-Accel-Redirect': location,
-                                        'Cache-Control': 'no-store, no-cache',
-                                    }
-                                })
-                            }
-                        } catch {}
+            if (token) {
+                const match = pathname.match(/github\.com\/([^/]+)\/([^/]+)\/actions\/runs\/\d+\/artifacts\/(\d+)/i)
+                if (match) {
+                    const [, owner, repo, artifactId] = match
+                    const apiUrl = `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifactId}/zip`
+                    
+                    try {
+                        const apiRes = await fetch(apiUrl, {
+                            method: 'GET',
+                            headers: {
+                                'Accept': 'application/vnd.github+json',
+                                'Authorization': `Bearer ${token}`,
+                                'X-GitHub-Api-Version': '2022-11-28',
+                                'User-Agent': 'CF-GH-Proxy'
+                            },
+                            redirect: 'follow'
+                        })
+
+                        if (apiRes.ok) {
+                            const finalHeaders = new Headers(apiRes.headers)
+                            finalHeaders.delete('content-security-policy')
+                            finalHeaders.delete('clear-site-data')
+                            finalHeaders.delete('x-frame-options')
+                            
+                            for (const [k, v] of Object.entries(CORS_HEADERS)) finalHeaders.set(k, v)
+                            for (const [k, v] of Object.entries(SECURITY_HEADERS)) finalHeaders.set(k, v)
+                            
+                            finalHeaders.set('Content-Disposition', `attachment; filename="${repo}-artifact-${artifactId}.zip"`)
+                            
+                            return new Response(apiRes.body, {
+                                status: apiRes.status,
+                                headers: finalHeaders
+                            })
+                        } else {
+                            const errText = await apiRes.text().catch(() => 'Unknown error')
+                            return makeRes(`GitHub API Error: ${apiRes.status} - ${errText}`, apiRes.status)
+                        }
+                    } catch (apiErr) {
+                        console.error('Artifact API fetch failed:', apiErr)
                     }
                 }
-            } catch (probeErr) {
-                console.warn('Artifact probe failed:', probeErr)
             }
 
             return new Response(buildArtifactFallbackHTML(targetUrl), {
@@ -354,6 +375,9 @@ code{background:#1c2128;padding:2px 6px;border-radius:4px;font-size:0.85rem;colo
 <div class="note">
 <strong>💡 为什么不能直接代理下载？</strong><br>
 GitHub 的 Artifact 下载链接绑定了您的浏览器 Session Cookie。当您通过代理访问时，浏览器不会将 github.com 的 Cookie 发送给代理域名，导致 GitHub 拒绝请求。这是浏览器的安全机制，无法绕过。<br><br>
+<strong>🔑 如何通过代理直接下载？</strong><br>
+您可以使用 GitHub Personal Access Token (PAT) 通过 API 下载。请在 URL 后添加 <code>?token=YOUR_TOKEN</code>，或在请求头中添加 <code>Authorization: Bearer YOUR_TOKEN</code>。<br>
+示例：<code>${originalUrl}?token=ghp_xxxx</code><br><br>
 <strong>建议：</strong>直接在 GitHub 页面点击下载，或使用 <code>gh run download</code> CLI 命令。
 </div>
 </div>
