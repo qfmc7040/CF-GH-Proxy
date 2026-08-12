@@ -3,11 +3,10 @@
 const CONFIG = {
     PREFIX: '/',
     CACHE_TTL: 86400,
-    MAX_CACHE_SIZE: 10 * 1024 * 1024,
-    RATE_LIMIT_WINDOW: 60,
-    RATE_LIMIT_MAX: 100,
+    MAX_CACHE_SIZE: 50 * 1024 * 1024,
+    RATE_LIMIT_WINDOW: 30,
+    RATE_LIMIT_MAX: 50,
     IS_PRODUCTION: true,
-    MAX_REDIRECTS: 5,
 }
 
 const GITHUB_PATTERNS = [
@@ -33,22 +32,13 @@ const SAFE_REDIRECT_HOSTS = new Set([
 
 const AZURE_BLOB_SUFFIXES = ['.blob.core.windows.net', '.azureedge.net']
 
-const ALLOWED_HOSTNAMES = new Set([
+const ALLOWED_HOSTNAMES = [
     'github.com', 'raw.githubusercontent.com', 'raw.github.com',
     'gist.githubusercontent.com', 'gist.github.com', 'api.github.com',
     'codeload.github.com', 'objects.githubusercontent.com',
     'github.githubassets.com', 'copilot.githubusercontent.com',
     'actions.githubusercontent.com',
-])
-
-const NO_SIMPLIFY_REGEX = [
-    /^api\.github\.com$/,
-    /\/releases\/download\//,
-    /^gist\.(?:githubusercontent|github)\.com$/,
-    /\/actions\/runs\/\d+\/artifacts\//
 ]
-
-const STABLE_QUERY_PARAMS = new Set(['ref', 'tag', 'branch', 'commit'])
 
 const SECURITY_HEADERS = {
     'x-content-type-options': 'nosniff',
@@ -63,9 +53,7 @@ const CORS_HEADERS = {
 
 const PREFLIGHT_RESP = new Response(null, {
     status: 204,
-    headers: {
-        ...CORS_HEADERS,
-        ...SECURITY_HEADERS,
+    headers: { ...CORS_HEADERS, ...SECURITY_HEADERS,
         'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS',
         'access-control-allow-headers': 'Content-Type, Authorization, Accept, X-Requested-With',
         'access-control-max-age': '1728000',
@@ -73,40 +61,19 @@ const PREFLIGHT_RESP = new Response(null, {
 })
 
 function makeRes(body, status = 200, headers = {}) {
-    return new Response(body, {
-        status,
-        headers: { ...CORS_HEADERS, ...SECURITY_HEADERS, ...headers }
-    })
+    return new Response(body, { status, headers: { ...CORS_HEADERS, ...SECURITY_HEADERS, ...headers } })
 }
 
 function makeErrorRes(err) {
     console.error('[Worker Error]', err)
-    const message = CONFIG.IS_PRODUCTION ? 'Internal Server Error' : (err.stack || err.message)
-    const status = CONFIG.IS_PRODUCTION ? 500 : 502
-    return makeRes(message, status)
+    return makeRes(CONFIG.IS_PRODUCTION ? 'Internal Server Error' : (err.stack || err.message), CONFIG.IS_PRODUCTION ? 500 : 502)
 }
 
-function parseTargetUrl(input) {
-    if (!input) return null
-    let urlStr = input
-    if (urlStr.startsWith('/')) urlStr = urlStr.slice(1)
-    if (!urlStr.startsWith('http')) urlStr = 'https://' + urlStr
-    
+function newUrl(urlStr) {
     try {
+        if (!urlStr.startsWith('http')) urlStr = 'https://' + urlStr
         return new URL(urlStr)
-    } catch {
-        return null
-    }
-}
-
-function isValidGitHubUrl(urlObj) {
-    if (!urlObj) return false
-    const hostname = urlObj.hostname.toLowerCase()
-    const href = urlObj.href
-    
-    if (ALLOWED_HOSTNAMES.has(hostname)) return true
-    
-    return GITHUB_PATTERNS.some(p => p.test(href))
+    } catch { return null }
 }
 
 function isArtifactPath(pathname) {
@@ -121,73 +88,26 @@ async function checkRateLimit(req, event) {
     try {
         const ip = req.headers.get('cf-connecting-ip') || 'unknown'
         const now = Math.floor(Date.now() / 1000)
-        const windowStart = Math.floor(now / CONFIG.RATE_LIMIT_WINDOW)
-        const windowKey = `rl:${ip}:${windowStart}`
+        const windowKey = `rl:${ip}:${Math.floor(now / CONFIG.RATE_LIMIT_WINDOW)}`
         const cacheKey = `https://cache.internal/rate-limit/${windowKey}`
-        
         const cache = caches.default
+        let currentCount = 0
         const cacheReq = new Request(cacheKey, { method: 'GET' })
         const cached = await cache.match(cacheReq)
-        
-        let currentCount = 0
         if (cached) {
             currentCount = parseInt(await cached.text(), 10) || 0
             if (currentCount >= CONFIG.RATE_LIMIT_MAX) {
-                const retryAfter = (windowStart + 1) * CONFIG.RATE_LIMIT_WINDOW - now
+                const retryAfter = (Math.floor(now / CONFIG.RATE_LIMIT_WINDOW) + 1) * CONFIG.RATE_LIMIT_WINDOW - now
                 return makeRes(JSON.stringify({ error: 'Rate limit exceeded', retry_after: retryAfter }), 429, {
-                    'content-type': 'application/json; charset=utf-8',
-                    'retry-after': String(retryAfter),
+                    'content-type': 'application/json; charset=utf-8', 'retry-after': String(retryAfter),
                 })
             }
         }
-        
         event.waitUntil(cache.put(cacheReq, new Response(String(currentCount + 1), {
             headers: { 'cache-control': `public, max-age=${CONFIG.RATE_LIMIT_WINDOW}` }
         })))
         return null
-    } catch (e) {
-        console.warn('Rate limit bypass due to error:', e)
-        return null
-    }
-}
-
-function buildCacheKey(pathname) {
-    try {
-        const url = parseTargetUrl(pathname)
-        if (!url) throw new Error('Invalid URL for cache key')
-        
-        const shouldSkipSimplify = NO_SIMPLIFY_REGEX.some(p => p.test(url.hostname) || p.test(url.pathname))
-        
-        if (!shouldSkipSimplify) {
-            for (const key of [...url.searchParams.keys()]) {
-                if (!STABLE_QUERY_PARAMS.has(key)) {
-                    url.searchParams.delete(key)
-                }
-            }
-        }
-        
-        return new Request(url.href, { method: 'GET' })
-    } catch {
-        return new Request(`https://fallback.invalid/${pathname}`, { method: 'GET' })
-    }
-}
-
-function getDynamicCorsHeaders(req, targetUrl) {
-    try {
-        const url = parseTargetUrl(targetUrl)
-        if (url && (url.hostname === 'api.github.com' || url.searchParams.has('token'))) {
-            const origin = req.headers.get('origin')
-            if (origin) {
-                return {
-                    'access-control-allow-origin': origin,
-                    'access-control-expose-headers': '*',
-                    'vary': 'Origin'
-                }
-            }
-            return { 'access-control-expose-headers': '*' }
-        }
-    } catch {}
-    return { ...CORS_HEADERS }
+    } catch (e) { console.warn('Rate limit bypass:', e); return null }
 }
 
 addEventListener('fetch', e => {
@@ -197,36 +117,29 @@ addEventListener('fetch', e => {
 async function fetchHandler(e) {
     const req = e.request
     const urlObj = new URL(req.url)
-    
     if (req.method === 'OPTIONS') return PREFLIGHT_RESP
 
     const rateLimited = await checkRateLimit(req, e)
     if (rateLimited) return rateLimited
 
-    let qParam = urlObj.searchParams.get('q')
-    if (qParam) {
-        const targetUrl = parseTargetUrl(qParam)
-        if (targetUrl && isValidGitHubUrl(targetUrl)) {
-            const redirectPath = encodeURIComponent(targetUrl.href)
-            const normalizedPath = targetUrl.href.replace(/^https?:\/+/, '')
-            return Response.redirect(`https://${urlObj.host}${CONFIG.PREFIX}${normalizedPath}`, 301)
+    let path = urlObj.searchParams.get('q')
+    if (path) {
+        const normalizedPath = path.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
+        const patternMatch = GITHUB_PATTERNS.some(p => p.test(normalizedPath))
+        let hostnameMatch = false
+        try { hostnameMatch = ALLOWED_HOSTNAMES.includes(new URL(normalizedPath).hostname.toLowerCase()) } catch {}
+        if (patternMatch && hostnameMatch) {
+            return Response.redirect('https://' + urlObj.host + CONFIG.PREFIX + normalizedPath, 301)
         }
         return makeRes('Blocked: Invalid redirect target.', 403)
     }
 
     let rawPath = urlObj.pathname
-    if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) {
-        rawPath = rawPath.slice(CONFIG.PREFIX.length)
-    }
-    
-    const path = rawPath.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
+    if (CONFIG.PREFIX !== '/' && rawPath.startsWith(CONFIG.PREFIX)) rawPath = rawPath.slice(CONFIG.PREFIX.length)
+    path = rawPath.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
 
     if (!path) return serveIndex()
-
-    const testUrl = parseTargetUrl(path)
-    if (testUrl && isValidGitHubUrl(testUrl)) {
-        return proxyRequest(e, req, path)
-    }
+    if (GITHUB_PATTERNS.some(p => p.test(path))) return proxyRequest(e, req, path)
 
     return makeRes(JSON.stringify({ error: 'Not Found', message: 'Only GitHub URLs are supported.' }), 404, {
         'content-type': 'application/json; charset=utf-8'
@@ -236,56 +149,86 @@ async function fetchHandler(e) {
 async function proxyRequest(e, req, pathname) {
     try {
         const isArtifact = isArtifactPath(pathname)
-        const dynamicCors = getDynamicCorsHeaders(req, pathname)
-        const cache = caches.default
-        const cacheKey = buildCacheKey(pathname)
 
         if (isArtifact) {
-            return handleArtifactRequest(pathname, dynamicCors)
+            const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
+            const urlObj = newUrl(targetUrl)
+            if (!urlObj) return makeRes('Invalid target URL', 400)
+
+            try {
+                const probeRes = await fetch(urlObj.href, {
+                    method: 'HEAD',
+                    headers: { 'User-Agent': 'Mozilla/5.0 CF-GH-Proxy' },
+                    redirect: 'manual',
+                    cf: { cacheEverything: false }
+                })
+
+                if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
+                    const location = probeRes.headers.get('location')
+                    if (location) {
+                        try {
+                            const nextUrl = new URL(location, urlObj.href)
+                            if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
+                                return new Response(null, {
+                                    status: 302,
+                                    headers: {
+                                        'Location': location,
+                                        'Access-Control-Allow-Origin': '*',
+                                        'X-Accel-Redirect': location,
+                                        'Cache-Control': 'no-store, no-cache',
+                                    }
+                                })
+                            }
+                        } catch {}
+                    }
+                }
+            } catch (probeErr) {
+                console.warn('Artifact probe failed:', probeErr)
+            }
+
+            return new Response(buildArtifactFallbackHTML(targetUrl), {
+                status: 200,
+                headers: {
+                    'content-type': 'text/html; charset=utf-8',
+                    ...CORS_HEADERS,
+                    ...SECURITY_HEADERS,
+                    'Cache-Control': 'no-store',
+                }
+            })
         }
+
+        const cache = caches.default
+        const cacheKey = buildCacheKey(pathname)
+        const dynamicCors = getDynamicCorsHeaders(req, pathname)
 
         if (req.method === 'GET') {
             const cached = await cache.match(cacheKey)
             if (cached) {
                 const clientEtag = req.headers.get('if-none-match')
                 const cachedEtag = cached.headers.get('etag')
-                
                 if (clientEtag && clientEtag === cachedEtag) {
-                    return new Response(null, {
-                        status: 304,
-                        headers: { ...dynamicCors, ...SECURITY_HEADERS, 'etag': cachedEtag, 'x-cache-status': 'HIT-304' }
-                    })
+                    return new Response(null, { status: 304, headers: { ...dynamicCors, ...SECURITY_HEADERS, 'etag': cachedEtag, 'x-cache-status': 'HIT-304' } })
                 }
-                
                 const hitHeaders = new Headers(cached.headers)
                 hitHeaders.set('x-cache-status', 'HIT')
                 for (const [k, v] of Object.entries(dynamicCors)) hitHeaders.set(k, v)
                 for (const [k, v] of Object.entries(SECURITY_HEADERS)) hitHeaders.set(k, v)
-                
                 return new Response(cached.body, { status: cached.status, headers: hitHeaders })
             }
         }
 
-        const targetUrl = parseTargetUrl(pathname)
-        if (!targetUrl) return makeRes('Invalid target URL', 400)
+        const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
+        const urlObj = newUrl(targetUrl)
+        if (!urlObj) return makeRes('Invalid target URL', 400)
 
         const reqHdrNew = new Headers(req.headers)
-        reqHdrNew.delete('cookie')
-        reqHdrNew.delete('authorization')
-        reqHdrNew.delete('host')
-        
+        reqHdrNew.delete('cookie'); reqHdrNew.delete('authorization'); reqHdrNew.delete('host')
         const rangeHeader = req.headers.get('range')
         if (rangeHeader) reqHdrNew.set('range', rangeHeader)
 
-        const response = await handleProxyFetch(targetUrl, {
-            method: req.method,
-            headers: reqHdrNew,
-            redirect: 'manual',
-            body: req.body,
-            cf: {
-                cacheEverything: true,
-                cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "404": 1 }
-            }
+        const response = await handleProxyFetch(urlObj, {
+            method: req.method, headers: reqHdrNew, redirect: 'manual', body: req.body,
+            cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "404": 1 } }
         }, 0)
 
         if (!response.ok && response.status !== 304 && response.status !== 206) {
@@ -298,7 +241,6 @@ async function proxyRequest(e, req, pathname) {
         if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
             const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
             const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
-            
             const finalHeaders = new Headers(response.headers)
             for (const [k, v] of Object.entries(dynamicCors)) finalHeaders.set(k, v)
             for (const [k, v] of Object.entries(SECURITY_HEADERS)) finalHeaders.set(k, v)
@@ -306,13 +248,9 @@ async function proxyRequest(e, req, pathname) {
             if (shouldCache && response.body) {
                 finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
                 finalHeaders.set('x-cache-status', 'MISS')
-                
                 try {
                     const [forClient, forCache] = response.body.tee()
-                    e.waitUntil(cache.put(cacheKey, new Response(forCache, {
-                        status: response.status,
-                        headers: finalHeaders
-                    })))
+                    e.waitUntil(cache.put(cacheKey, new Response(forCache, { status: response.status, headers: finalHeaders })))
                     return new Response(forClient, { status: response.status, headers: finalHeaders })
                 } catch (teeErr) {
                     console.error('Tee failed:', teeErr)
@@ -330,102 +268,60 @@ async function proxyRequest(e, req, pathname) {
         for (const [k, v] of Object.entries(dynamicCors)) missHeaders.set(k, v)
         for (const [k, v] of Object.entries(SECURITY_HEADERS)) missHeaders.set(k, v)
         return new Response(response.body, { status: response.status, headers: missHeaders })
-
     } catch (err) {
         console.error('Proxy Error:', err)
         return makeErrorRes(err)
     }
 }
 
-async function handleArtifactRequest(pathname, dynamicCors) {
-    const targetUrl = parseTargetUrl(pathname)
-    if (!targetUrl) return makeRes('Invalid target URL', 400)
-
+function buildCacheKey(pathname) {
     try {
-        const probeRes = await fetch(targetUrl.href, {
-            method: 'HEAD',
-            headers: { 'User-Agent': 'Mozilla/5.0 CF-GH-Proxy' },
-            redirect: 'manual',
-            cf: { cacheEverything: false }
-        })
+        const url = newUrl(pathname)
+        if (!url) throw new Error('Invalid URL')
+        const NO_SIMPLIFY = [/^api\.github\.com$/, /\/releases\/download\//, /^gist\.(?:githubusercontent|github)\.com$/, /\/actions\/runs\/\d+\/artifacts\//]
+        if (NO_SIMPLIFY.some(p => p.test(url.hostname) || p.test(url.pathname))) return new Request(url.href, { method: 'GET' })
+        const STABLE = ['ref', 'tag', 'branch', 'commit']
+        for (const key of [...url.searchParams.keys()]) { if (!STABLE.includes(key)) url.searchParams.delete(key) }
+        return new Request(url.href, { method: 'GET' })
+    } catch { return new Request(`https://fallback.invalid/${pathname}`, { method: 'GET' }) }
+}
 
-        if ([301, 302, 303, 307, 308].includes(probeRes.status)) {
-            const location = probeRes.headers.get('location')
-            if (location) {
-                try {
-                    const nextUrl = new URL(location, targetUrl.href)
-                    if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || isSafeAzureRedirect(nextUrl.hostname)) {
-                        return new Response(null, {
-                            status: 302,
-                            headers: {
-                                'Location': location,
-                                'Access-Control-Allow-Origin': '*',
-                                'X-Accel-Redirect': location,
-                                'Cache-Control': 'no-store, no-cache',
-                            }
-                        })
-                    }
-                } catch {}
-            }
+function getDynamicCorsHeaders(req, targetUrl) {
+    try {
+        const url = newUrl(targetUrl)
+        if (url && (url.hostname === 'api.github.com' || url.searchParams.has('token'))) {
+            const origin = req.headers.get('origin')
+            if (origin) return { 'access-control-allow-origin': origin, 'access-control-expose-headers': '*', 'vary': 'Origin' }
+            return { 'access-control-expose-headers': '*' }
         }
-    } catch (probeErr) {
-        console.warn('Artifact probe failed:', probeErr)
-    }
-
-    return new Response(buildArtifactFallbackHTML(targetUrl.href), {
-        status: 200,
-        headers: {
-            'content-type': 'text/html; charset=utf-8',
-            ...CORS_HEADERS,
-            ...SECURITY_HEADERS,
-            'Cache-Control': 'no-store',
-        }
-    })
+    } catch {}
+    return { ...CORS_HEADERS }
 }
 
 async function handleProxyFetch(urlObj, init, redirectCount) {
-    if (redirectCount > CONFIG.MAX_REDIRECTS) {
-        return makeRes('Too many redirects', 508)
-    }
-    
+    if (redirectCount > 5) return makeRes('Too many redirects', 508)
     try {
         const res = await fetch(urlObj.href, init)
-        
         if ([301, 302, 303, 307, 308].includes(res.status)) {
             const location = res.headers.get('location')
             if (!location) return res
-            
             const nextUrl = new URL(location, urlObj.href)
-            
-            if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || 
-                GITHUB_PATTERNS.some(p => p.test(nextUrl.href)) || 
-                isSafeAzureRedirect(nextUrl.hostname)) {
+            if (SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || GITHUB_PATTERNS.some(p => p.test(nextUrl.href)) || isSafeAzureRedirect(nextUrl.hostname)) {
                 return handleProxyFetch(nextUrl, init, redirectCount + 1)
             }
-            
             const safeHeaders = new Headers(res.headers)
             safeHeaders.delete('set-cookie')
             safeHeaders.set('access-control-expose-headers', '*')
             for (const [k, v] of Object.entries(SECURITY_HEADERS)) safeHeaders.set(k, v)
-            
             return new Response(null, { status: res.status, headers: safeHeaders })
         }
-        
         const resHdrNew = new Headers(res.headers)
-        resHdrNew.delete('content-security-policy')
-        resHdrNew.delete('clear-site-data')
-        resHdrNew.delete('x-frame-options')
-        
+        resHdrNew.delete('content-security-policy'); resHdrNew.delete('clear-site-data'); resHdrNew.delete('x-frame-options')
         return new Response(res.body, { status: res.status, headers: resHdrNew })
-        
-    } catch (err) {
-        return makeRes('Proxy Error: ' + err.message, 502)
-    }
+    } catch (err) { return makeRes('Proxy Error: ' + err.message, 502) }
 }
 
 function buildArtifactFallbackHTML(originalUrl) {
-    const escapedUrl = originalUrl.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -438,7 +334,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .icon{font-size:48px;margin-bottom:16px}
 h1{font-size:1.5rem;margin-bottom:12px;color:#f0f6fc}
 p{line-height:1.6;margin-bottom:20px;color:#8b949e;font-size:0.95rem}
-.btn{display:inline-block;padding:12px 24px;background:#238636;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;transition:background .2s;border:none;cursor:pointer}
+.btn{display:inline-block;padding:12px 24px;background:#238636;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;transition:background .2s}
 .btn:hover{background:#2ea043}
 .btn-secondary{background:#21262d;border:1px solid #30363d;margin-left:12px}
 .btn-secondary:hover{background:#30363d}
@@ -452,8 +348,8 @@ code{background:#1c2128;padding:2px 6px;border-radius:4px;font-size:0.85rem;colo
 <h1>Artifact 需要 GitHub 登录</h1>
 <p>GitHub Actions Artifacts 要求用户登录后才能下载。<br>由于浏览器安全策略，代理无法获取您的 GitHub 登录状态。</p>
 <div>
-<a class="btn" href="${escapedUrl}" target="_blank" rel="noopener">前往 GitHub 下载</a>
-<button class="btn btn-secondary" onclick="navigator.clipboard.writeText('${escapedUrl}').then(()=>this.textContent='已复制 ✓')">复制链接</button>
+<a class="btn" href="${originalUrl}" target="_blank" rel="noopener">前往 GitHub 下载</a>
+<button class="btn btn-secondary" onclick="navigator.clipboard.writeText('${originalUrl}').then(()=>this.textContent='已复制 ✓')">复制链接</button>
 </div>
 <div class="note">
 <strong>💡 为什么不能直接代理下载？</strong><br>
@@ -503,33 +399,6 @@ function serveIndex() {
             <input type="text" class="search-input" name="q" placeholder="请输入GitHub文件或API链接" required>
             <button type="submit" class="search-button"><svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M13 5l7 7-7 7M5 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </form>
-        <div class="example">
-            <div class="example-title">📃 合法输入示例：</div>
-            <div class="example-list">
-                <p>📄 https://github.com/user/repo/archive/master.zip</p>
-                <p>📦 https://github.com/user/repo/archive/refs/heads/main.tar.gz</p>
-                <p>🏷️ https://github.com/user/repo/tags</p>
-                <p>ℹ️ https://github.com/user/repo/info/refs?service=git-upload-pack</p>
-                <p>🔧 https://github.com/user/repo/git-upload-pack</p>
-                <p>📂 https://github.com/user/repo/releases/download/v1.0/file.zip</p>
-                <p>💾 https://github.com/user/repo/blob/main/README.md</p>
-                <p>📝 https://github.com/user/repo/raw/main/src/index.js</p>
-                <p>📥 https://github.com/user/repo/actions/runs/123456/artifacts/789012/zip</p>
-                <p>🌐 https://raw.githubusercontent.com/user/repo/main/file.txt</p>
-                <p>🌐 https://raw.github.com/user/repo/main/file.txt</p>
-                <p>🖨️ https://gist.githubusercontent.com/user/hash/raw/file.py</p>
-                <p>🖨️ https://gist.github.com/user/hash</p>
-                <p>☁️ https://api.github.com/repos/user/repo</p>
-                <p>☁️ https://api.github.com/users/user</p>
-                <p>🗜️ https://codeload.github.com/user/repo/tar.gz/main</p>
-                <p>🗜️ https://codeload.github.com/user/repo/zip/refs/tags/v1.0</p>
-                <p>🗜️ https://codeload.github.com/user/repo/legacy.zip/main</p>
-                <p>🔗 https://objects.githubusercontent.com/github-production-upload/...</p>
-                <p>🎨 https://github.githubassets.com/assets/mona-xxx.svg</p>
-                <p>🤖 https://copilot.githubusercontent.com/...</p>
-                <p>⚙️ https://actions.githubusercontent.com/...</p>
-            </div>
-        </div>
         <p style="margin-top:2rem;color:rgba(255,255,255,.6)"><a href="https://github.com/qfmc7040/CF-GH-Proxy/" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.4)">QFMC</a> 访问以参考项目</p>
     </div>
     <script>function toSubmit(e){e.preventDefault();const i=document.getElementsByName('q')[0];window.open(location.href.substr(0,location.href.lastIndexOf('/')+1)+i.value)}</script>
