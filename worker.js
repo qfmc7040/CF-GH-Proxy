@@ -423,8 +423,8 @@ function serveIndex() {
             <input type="text" class="search-input" name="q" placeholder="请输入GitHub文件或API链接" required>
             <button type="submit" class="search-button"><svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M13 5l7 7-7 7M5 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </form>
-        <p style="margin-top:2rem;color:rgba(255,255,255,.6)"><a href="https://github.com/qfmc7040/CF-GH-Proxy/" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.4)">QFMC</a> 访问以参考项目</p>
-        <p style="margin-top:2rem;color:rgba(255,255,255,.6)"><a href="https://github.akams.cn/" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.4)">GitHub Proxy</a> 点击访问GitHub 文件下载加速代理聚合项目</p>
+        <p style="margin-top:2rem;color:rgba(57, 197, 187,.6)"><a href="https://github.com/qfmc7040/CF-GH-Proxy/" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.4)">QFMC</a> 访问以参考项目</p>
+        <p style="margin-top:2rem;color:rgba(57, 197, 187,.6)"><a href="https://github.akams.cn/" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.4)">GitHub Proxy</a> 点击访问GitHub 文件下载加速代理聚合项目</p>
     </div>
     <script>function toSubmit(e){e.preventDefault();const i=document.getElementsByName('q')[0];window.open(location.href.substr(0,location.href.lastIndexOf('/')+1)+i.value)}</script>
 </body>
