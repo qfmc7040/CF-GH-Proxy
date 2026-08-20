@@ -1,6 +1,8 @@
 # CF-GH-Proxy
 本项目是一个基于 Cloudflare Workers 的 Github 镜像代理工具。它能够中转 Github 项目请求，解决一些访问限制和加速访问的问题。
 
+<img width="848" height="599" alt="image" src="https://github.com/user-attachments/assets/9437bbdb-d050-47f7-801e-64e1566cfadd" />
+
 ## Workers 部署方法
 ### 部署 Cloudflare Worker：
 
