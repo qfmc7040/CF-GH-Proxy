@@ -3,7 +3,7 @@
 const CONFIG = {
     PREFIX: '/',
     CACHE_TTL: 604800,
-    MAX_CACHE_SIZE: 300 * 1024 * 1024,
+    MAX_CACHE_SIZE: 250 * 1024 * 1024,
     RATE_LIMIT_WINDOW: 30,
     RATE_LIMIT_MAX: 50,
     IS_PRODUCTION: true,
@@ -57,7 +57,7 @@ const PREFLIGHT_RESP = new Response(null, {
         ...CORS_HEADERS, 
         ...SECURITY_HEADERS,
         'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS',
-        'access-control-allow-headers': 'Content-Type, Authorization, Accept, X-Requested-With',
+        'access-control-allow-headers': 'Content-Type, Authorization, Accept, X-Requested-With, Range',
         'access-control-max-age': '1728000',
     },
 })
@@ -255,7 +255,9 @@ async function proxyRequest(e, req, pathname) {
         const cacheKey = buildCacheKey(pathname)
         const dynamicCors = getDynamicCorsHeaders(req, pathname)
 
-        if (req.method === 'GET') {
+        const isRangeRequest = !!req.headers.get('range')
+        
+        if (req.method === 'GET' && !isRangeRequest) {
             const cached = await cache.match(cacheKey)
             if (cached) {
                 const clientEtag = req.headers.get('if-none-match')
@@ -285,7 +287,9 @@ async function proxyRequest(e, req, pathname) {
         reqHdrNew.delete('host')
         
         const rangeHeader = req.headers.get('range')
-        if (rangeHeader) reqHdrNew.set('range', rangeHeader)
+        if (rangeHeader) {
+            reqHdrNew.set('range', rangeHeader)
+        }
 
         const response = await handleProxyFetch(urlObj, {
             method: req.method, 
@@ -293,8 +297,8 @@ async function proxyRequest(e, req, pathname) {
             redirect: 'manual',
             body: req.body,
             cf: { 
-                cacheEverything: true, 
-                cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL, "301-302": 3600, "404": 1 } 
+                cacheEverything: false,
+                cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL } 
             }
         }, 0)
 
@@ -328,24 +332,32 @@ async function proxyRequest(e, req, pathname) {
             return new Response(response.body, { status: response.status, headers: errHeaders })
         }
 
-        if (req.method === 'GET' && response.status >= 200 && response.status < 400) {
+        if (req.method === 'GET' && (response.status === 200 || response.status === 206)) {
             const contentLength = parseInt(response.headers.get('content-length') || '0', 10)
-            const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
             
             const finalHeaders = new Headers(response.headers)
             applyCommonHeaders(finalHeaders)
             for (const [k, v] of Object.entries(dynamicCors)) finalHeaders.set(k, v)
 
+            if (response.status === 206) {
+                finalHeaders.set('x-cache-status', 'RANGE-BYPASS')
+                return new Response(response.body, { status: 206, headers: finalHeaders })
+            }
+
+            const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
+            
             if (shouldCache && response.body) {
                 finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
                 finalHeaders.set('x-cache-status', 'MISS')
                 
                 try {
                     const [forClient, forCache] = response.body.tee()
+                    
                     e.waitUntil(cache.put(cacheKey, new Response(forCache, { 
                         status: response.status, 
                         headers: finalHeaders 
                     })))
+                    
                     return new Response(forClient, { status: response.status, headers: finalHeaders })
                 } catch (teeErr) {
                     console.error('Tee failed:', teeErr)
@@ -353,7 +365,8 @@ async function proxyRequest(e, req, pathname) {
                     return new Response(response.body, { status: response.status, headers: finalHeaders })
                 }
             } else {
-                finalHeaders.set('x-cache-status', contentLength > CONFIG.MAX_CACHE_SIZE ? 'BYPASS-LARGE' : 'BYPASS')
+                finalHeaders.set('x-cache-status', contentLength > CONFIG.MAX_CACHE_SIZE ? 'STREAM-LARGE' : 'STREAM')
+                finalHeaders.delete('set-cookie')
                 return new Response(response.body, { status: response.status, headers: finalHeaders })
             }
         }
@@ -371,12 +384,6 @@ async function proxyRequest(e, req, pathname) {
     }
 }
 
-/**
- * 优化后的 Cache Key 生成逻辑
- * 1. 静态资源 (Raw, Releases, Assets): 完全忽略查询参数，极大提升命中率
- * 2. API 请求: 保留参数但清理追踪字段并排序
- * 3. 统一 Host 小写化
- */
 function buildCacheKey(pathname) {
     try {
         const url = newUrl(pathname)
