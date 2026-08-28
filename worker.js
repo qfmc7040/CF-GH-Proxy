@@ -558,15 +558,93 @@ function serveIndex() {
     <title>GitHub 文件加速</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script>
+        // 主题早期初始化：优先使用手动选择，否则按 UTC+8 时间判定昼夜（避免页面闪烁）
+        (function () {
+            function autoTheme() {
+                var hour = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+                return (hour >= 7 && hour < 18) ? 'light' : 'dark';
+            }
+            var pref = null;
+            try { pref = localStorage.getItem('gh_proxy_theme'); } catch (e) {}
+            var theme = (pref === 'light' || pref === 'dark') ? pref : autoTheme();
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
     <style>
+        /* ========== 主题变量：默认夜间模式（保留原配色） ========== */
         :root {
             --primary: #58a6ff;
             --primary-glow: rgba(88, 166, 255, 0.4);
             --bg-dark: #0d1117;
             --bg-card: rgba(22, 27, 34, 0.7);
+            --bg-panel: rgba(13, 17, 23, 0.6);
             --border: rgba(48, 54, 61, 0.7);
             --text-main: #c9d1d9;
             --text-muted: #8b949e;
+            --danger: #f85149;
+            /* Scrollbar colors */
+            --scrollbar-track: rgba(13, 17, 23, 0.3);
+            --scrollbar-thumb: rgba(48, 54, 61, 0.8);
+            --scrollbar-thumb-hover: rgba(88, 166, 255, 0.6);
+            /* 页面背景渐变 */
+            --body-bg-1: hsla(253,16%,7%,1);
+            --body-bg-2: hsla(225,39%,30%,1);
+            --body-bg-3: hsla(339,49%,30%,1);
+            /* 输入框 */
+            --input-bg: rgba(13, 17, 23, 0.6);
+            --input-bg-focus: rgba(13, 17, 23, 0.8);
+            --input-text: #ffffff;
+            --input-placeholder: rgba(139, 148, 158, 0.6);
+            /* 链接按钮与历史卡片 */
+            --chip-bg: rgba(255, 255, 255, 0.05);
+            --chip-bg-hover: rgba(255, 255, 255, 0.1);
+            --chip-text-hover: #ffffff;
+            --item-bg: rgba(255, 255, 255, 0.03);
+            --item-bg-hover: rgba(255, 255, 255, 0.08);
+            --meta-text: rgba(139, 148, 158, 0.6);
+            /* 标题渐变 / 阴影 / 光晕 */
+            --title-grad-start: #ffffff;
+            --title-grad-end: #a5d6ff;
+            --card-shadow: rgba(0, 0, 0, 0.4);
+            --glow-opacity: 0.15;
+            --toggle-bg: rgba(22, 27, 34, 0.7);
+            color-scheme: dark;
+        }
+
+        /* ========== 白天模式（UTC+8 07:00-18:00 自动启用，或手动切换） ========== */
+        html[data-theme="light"] {
+            --primary: #0969da;
+            --primary-glow: rgba(9, 105, 218, 0.25);
+            --bg-dark: #eef2f7;
+            --bg-card: rgba(255, 255, 255, 0.72);
+            --bg-panel: rgba(255, 255, 255, 0.6);
+            --border: rgba(208, 215, 222, 0.8);
+            --text-main: #1f2328;
+            --text-muted: #57606a;
+            --danger: #cf222e;
+            --scrollbar-track: rgba(234, 238, 242, 0.9);
+            --scrollbar-thumb: rgba(175, 184, 193, 0.9);
+            --scrollbar-thumb-hover: rgba(9, 105, 218, 0.55);
+            --body-bg-1: hsla(210,100%,94%,1);
+            --body-bg-2: hsla(212,95%,84%,1);
+            --body-bg-3: hsla(330,85%,90%,1);
+            --input-bg: rgba(255, 255, 255, 0.75);
+            --input-bg-focus: rgba(255, 255, 255, 0.95);
+            --input-text: #1f2328;
+            --input-placeholder: rgba(87, 96, 106, 0.55);
+            --chip-bg: rgba(31, 35, 40, 0.04);
+            --chip-bg-hover: rgba(9, 105, 218, 0.08);
+            --chip-text-hover: #0969da;
+            --item-bg: rgba(31, 35, 40, 0.03);
+            --item-bg-hover: rgba(9, 105, 218, 0.06);
+            --meta-text: rgba(87, 96, 106, 0.65);
+            --title-grad-start: #1f2328;
+            --title-grad-end: #0969da;
+            --card-shadow: rgba(140, 152, 175, 0.28);
+            --glow-opacity: 0.18;
+            --toggle-bg: rgba(255, 255, 255, 0.75);
+            color-scheme: light;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; outline: none; }
@@ -576,12 +654,13 @@ function serveIndex() {
             min-height: 100vh;
             background-color: var(--bg-dark);
             background-image: 
-                radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
-                radial-gradient(at 50% 0%, hsla(225,39%,30%,1) 0, transparent 50%), 
-                radial-gradient(at 100% 0%, hsla(339,49%,30%,1) 0, transparent 50%);
+                radial-gradient(at 0% 0%, var(--body-bg-1) 0, transparent 50%), 
+                radial-gradient(at 50% 0%, var(--body-bg-2) 0, transparent 50%), 
+                radial-gradient(at 100% 0%, var(--body-bg-3) 0, transparent 50%);
             background-size: 200% 200%;
             animation: gradientMove 15s ease infinite;
             color: var(--text-main);
+            transition: color 0.3s ease;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -595,22 +674,41 @@ function serveIndex() {
             100% { background-position: 0% 50%; }
         }
 
-        .container {
+        /* Main Layout Container */
+        .main-wrapper {
             width: 100%;
-            max-width: 700px;
-            padding: 40px;
+            max-width: 1100px;
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        @media (max-width: 900px) {
+            .main-wrapper {
+                grid-template-columns: 1fr;
+                max-width: 600px;
+            }
+        }
+
+        /* Left Panel: Main Content */
+        .left-panel {
             background: var(--bg-card);
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
             border: 1px solid var(--border);
             border-radius: 24px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            padding: 40px;
+            box-shadow: 0 20px 40px var(--card-shadow);
             text-align: center;
-            position: relative;
-            z-index: 1;
+            transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
         }
 
-        .container::before {
+        .left-panel::before {
             content: '';
             position: absolute;
             top: -2px; left: -2px; right: -2px; bottom: -2px;
@@ -618,7 +716,7 @@ function serveIndex() {
             z-index: -1;
             border-radius: 26px;
             filter: blur(20px);
-            opacity: 0.15;
+            opacity: var(--glow-opacity);
         }
 
         .logo {
@@ -633,7 +731,7 @@ function serveIndex() {
             font-size: 2.2rem;
             font-weight: 700;
             margin-bottom: 0.5rem;
-            background: linear-gradient(135deg, #fff 0%, #a5d6ff 100%);
+            background: linear-gradient(135deg, var(--title-grad-start) 0%, var(--title-grad-end) 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             letter-spacing: -0.5px;
@@ -649,6 +747,7 @@ function serveIndex() {
             position: relative;
             max-width: 500px;
             margin: 0 auto 2rem auto;
+            width: 100%;
         }
 
         .search-input {
@@ -656,8 +755,8 @@ function serveIndex() {
             height: 54px;
             padding: 0 60px 0 24px;
             font-size: 1rem;
-            color: #fff;
-            background: rgba(13, 17, 23, 0.6);
+            color: var(--input-text);
+            background: var(--input-bg);
             border: 1px solid var(--border);
             border-radius: 16px;
             transition: all 0.3s ease;
@@ -667,10 +766,10 @@ function serveIndex() {
         .search-input:focus {
             border-color: var(--primary);
             box-shadow: 0 0 0 4px var(--primary-glow), inset 0 2px 4px rgba(0,0,0,0.1);
-            background: rgba(13, 17, 23, 0.8);
+            background: var(--input-bg-focus);
         }
 
-        .search-input::placeholder { color: rgba(139, 148, 158, 0.6); }
+        .search-input::placeholder { color: var(--input-placeholder); }
 
         .search-button {
             position: absolute;
@@ -708,7 +807,7 @@ function serveIndex() {
             display: inline-flex;
             align-items: center;
             padding: 8px 16px;
-            background: rgba(255, 255, 255, 0.05);
+            background: var(--chip-bg);
             border: 1px solid var(--border);
             border-radius: 20px;
             color: var(--text-muted);
@@ -718,8 +817,8 @@ function serveIndex() {
         }
 
         .link-btn:hover {
-            background: rgba(255, 255, 255, 0.1);
-            color: #fff;
+            background: var(--chip-bg-hover);
+            color: var(--chip-text-hover);
             border-color: var(--primary);
             transform: translateY(-2px);
         }
@@ -731,56 +830,414 @@ function serveIndex() {
             opacity: 0.6;
         }
 
+        /* Right Panel: History */
+        .right-panel {
+            background: var(--bg-panel);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 24px;
+            box-shadow: 0 20px 40px var(--card-shadow);
+            transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            height: fit-content;
+            max-height: 80vh;
+        }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .history-title {
+            color: var(--text-main);
+            font-size: 1.1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .clear-btn {
+            background: none;
+            border: none;
+            color: var(--danger);
+            cursor: pointer;
+            font-size: 0.85rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+        .clear-btn:hover {
+            background: rgba(248, 81, 73, 0.1);
+        }
+
+        .history-list {
+            list-style: none;
+            overflow-y: auto;
+            /* Firefox: Use opaque color for persistent scrollbar */
+            scrollbar-width: thin;
+            scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+            flex: 1;
+            min-height: 100px;
+            padding-right: 4px; /* Prevent content from touching scrollbar */
+        }
+
+        /* Webkit (Chrome, Edge, Safari): Persistent Scrollbar Styles */
+        .history-list::-webkit-scrollbar {
+            width: 8px;
+            background-color: var(--scrollbar-track); /* Track background makes it visible */
+        }
+
+        .history-list::-webkit-scrollbar-thumb {
+            background-color: var(--scrollbar-thumb);
+            border-radius: 4px;
+            border: 2px solid var(--scrollbar-track); /* Creates padding effect */
+        }
+
+        .history-list::-webkit-scrollbar-thumb:hover {
+            background-color: var(--scrollbar-thumb-hover);
+        }
+
+        .history-item {
+            display: flex;
+            flex-direction: column;
+            padding: 12px;
+            margin-bottom: 10px;
+            background: var(--item-bg);
+            border: 1px solid transparent;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .history-item:hover {
+            background: var(--item-bg-hover);
+            border-color: var(--primary);
+            transform: translateX(2px);
+        }
+
+        .history-filename {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--primary);
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .history-url {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 6px;
+        }
+
+        .history-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: var(--meta-text);
+        }
+
+        .empty-history {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 20px 0;
+            font-size: 0.9rem;
+            opacity: 0.6;
+        }
+
+        /* Theme Toggle Button */
+        .theme-toggle {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            background: var(--toggle-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            color: var(--text-main);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            box-shadow: 0 4px 14px var(--card-shadow);
+            transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+        }
+
+        .theme-toggle:hover {
+            transform: scale(1.08);
+            border-color: var(--primary);
+            box-shadow: 0 4px 18px var(--primary-glow);
+            color: var(--primary);
+        }
+
+        .theme-toggle svg {
+            width: 20px;
+            height: 20px;
+            position: absolute;
+            transition: opacity 0.25s ease, transform 0.25s ease;
+        }
+
+        /* 夜间模式显示太阳图标（点击切换到白天）；白天模式显示月亮图标 */
+        .theme-toggle .icon-sun { opacity: 1; transform: rotate(0deg) scale(1); }
+        .theme-toggle .icon-moon { opacity: 0; transform: rotate(-90deg) scale(0.4); }
+        html[data-theme="light"] .theme-toggle .icon-sun { opacity: 0; transform: rotate(90deg) scale(0.4); }
+        html[data-theme="light"] .theme-toggle .icon-moon { opacity: 1; transform: rotate(0deg) scale(1); }
+
         @media (max-width: 600px) {
-            .container { padding: 30px 20px; }
+            .theme-toggle { top: 12px; right: 12px; width: 40px; height: 40px; }
+            .theme-toggle svg { width: 18px; height: 18px; }
+            .left-panel { padding: 30px 20px; }
             .title { font-size: 1.8rem; }
             .search-input { height: 48px; font-size: 0.95rem; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="logo">
-            <a href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank">
-                <svg viewBox="0 0 98 96" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M48.854 0C21.839 0 0 22 0 49.217c0 21.756 13.993 40.172 33.405 46.69 2.427.49 3.316-1.059 3.316-2.362 0-1.141-.08-5.052-.08-9.127-13.59 2.934-16.42-5.867-16.42-5.867-2.184-5.704-5.42-7.17-5.42-7.17-4.448-3.015.324-3.015.324-3.015 4.934.326 7.523 5.052 7.523 5.052 4.367 7.496 11.404 5.378 14.235 4.074.404-3.178 1.699-5.378 3.074-6.6-10.839-1.141-22.243-5.378-22.243-24.283 0-5.378 1.94-9.778 5.014-13.2-.485-1.222-2.184-6.275.486-13.038 0 0 4.125-1.304 13.426 5.052a46.97 46.97 0 0 1 12.214-1.63c4.125 0 8.33.571 12.213 1.63 9.302-6.356 13.427-5.052 13.427-5.052 2.67 6.763.97 11.816.485 13.038 3.155 3.422 5.015 7.822 5.015 13.2 0 18.905-11.404 23.06-22.324 24.283 1.78 1.548 3.316 4.481 3.316 9.126 0 6.6-.08 11.897-.08 13.526 0 1.304.89 2.853 3.316 2.364 19.412-6.52 33.405-24.935 33.405-46.691C97.707 22 75.788 0 48.854 0z"/></svg>
-            </a>
-        </div>
-        <h1 class="title">GitHub 加速代理</h1>
-        <p class="subtitle">加速访问 Releases, Raw 文件及 API 接口</p>
-        
-        <form onsubmit="toSubmit(event)" class="search-container">
-            <input type="text" class="search-input" name="q" placeholder="请输入GitHub文件或API链接" required autocomplete="off">
-            <button type="submit" class="search-button">
-                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M13 5l7 7-7 7M5 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-        </form>
+    <!-- 昼夜模式切换按钮 -->
+    <button id="themeToggle" class="theme-toggle" type="button" title="切换白天/夜间模式（双击恢复按时间自动切换）" aria-label="切换白天/夜间模式">
+        <svg class="icon-sun" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" stroke-linecap="round"/></svg>
+        <svg class="icon-moon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
 
-        <div class="links-area">
-            <a href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank" class="link-btn">
-                <svg style="width:16px;height:16px;margin-right:6px" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-                项目源码
-            </a>
-            <a href="https://github.akams.cn/" target="_blank" class="link-btn">
-                <svg style="width:16px;height:16px;margin-right:6px" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zm0 9l2.5-1.25L12 8.5l-2.5 1.25L12 11zm0 2.5l-5-2.5-5 2.5L12 22l10-8.5-5-2.5-5 2.5z"/></svg>
-                聚合导航
-            </a>
+    <div class="main-wrapper">
+        <!-- Left Panel: Main Content -->
+        <div class="left-panel">
+            <div class="logo">
+                <a href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank">
+                    <svg viewBox="0 0 98 96" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M48.854 0C21.839 0 0 22 0 49.217c0 21.756 13.993 40.172 33.405 46.69 2.427.49 3.316-1.059 3.316-2.362 0-1.141-.08-5.052-.08-9.127-13.59 2.934-16.42-5.867-16.42-5.867-2.184-5.704-5.42-7.17-5.42-7.17-4.448-3.015.324-3.015.324-3.015 4.934.326 7.523 5.052 7.523 5.052 4.367 7.496 11.404 5.378 14.235 4.074.404-3.178 1.699-5.378 3.074-6.6-10.839-1.141-22.243-5.378-22.243-24.283 0-5.378 1.94-9.778 5.014-13.2-.485-1.222-2.184-6.275.486-13.038 0 0 4.125-1.304 13.426 5.052a46.97 46.97 0 0 1 12.214-1.63c4.125 0 8.33.571 12.213 1.63 9.302-6.356 13.427-5.052 13.427-5.052 2.67 6.763.97 11.816.485 13.038 3.155 3.422 5.015 7.822 5.015 13.2 0 18.905-11.404 23.06-22.324 24.283 1.78 1.548 3.316 4.481 3.316 9.126 0 6.6-.08 11.897-.08 13.526 0 1.304.89 2.853 3.316 2.364 19.412-6.52 33.405-24.935 33.405-46.691C97.707 22 75.788 0 48.854 0z"/></svg>
+                </a>
+            </div>
+            <h1 class="title">GitHub 加速代理</h1>
+            <p class="subtitle">加速访问 Releases, Raw 文件及 API 接口</p>
+            
+            <form onsubmit="toSubmit(event)" class="search-container">
+                <input type="text" class="search-input" name="q" placeholder="请输入GitHub文件或API链接" required autocomplete="off">
+                <button type="submit" class="search-button">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M13 5l7 7-7 7M5 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+            </form>
+
+            <div class="links-area">
+                <a href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank" class="link-btn">
+                    <svg style="width:16px;height:16px;margin-right:6px" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    项目源码
+                </a>
+                <a href="https://github.akams.cn/" target="_blank" class="link-btn">
+                    <svg style="width:16px;height:16px;margin-right:6px" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zm0 9l2.5-1.25L12 8.5l-2.5 1.25L12 11zm0 2.5l-5-2.5-5 2.5L12 22l10-8.5-5-2.5-5 2.5z"/></svg>
+                    聚合导航
+                </a>
+            </div>
+
+            <div class="footer-note">
+                Powered by Cloudflare Workers &copy; QFMC
+            </div>
         </div>
 
-        <div class="footer-note">
-            Powered by Cloudflare Workers &copy; QFMC
+        <!-- Right Panel: History -->
+        <div class="right-panel">
+            <div class="history-header">
+                <div class="history-title">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    最近访问
+                </div>
+                <button class="clear-btn" onclick="clearHistory()">清空</button>
+            </div>
+            <ul id="historyList" class="history-list">
+                <!-- Items will be injected here -->
+            </ul>
         </div>
     </div>
+
     <script>
+        // --- Theme Logic ---
+        const THEME_KEY = 'gh_proxy_theme';
+
+        function getAutoTheme() {
+            // 按 UTC+08:00 判定昼夜：07:00-18:00 为白天，其余为夜间
+            var hour = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+            return (hour >= 7 && hour < 18) ? 'light' : 'dark';
+        }
+
+        function currentTheme() {
+            return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+        }
+
+        function applyTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+        }
+
+        function initThemeToggle() {
+            var btn = document.getElementById('themeToggle');
+            if (!btn) return;
+
+            // 单击：手动切换昼夜模式，并记住偏好
+            btn.addEventListener('click', function () {
+                var next = currentTheme() === 'light' ? 'dark' : 'light';
+                applyTheme(next);
+                try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+            });
+
+            // 双击：清除手动偏好，恢复按 UTC+8 时间自动切换
+            btn.addEventListener('dblclick', function () {
+                try { localStorage.removeItem(THEME_KEY); } catch (e) {}
+                applyTheme(getAutoTheme());
+            });
+
+            // 无手动偏好时，跨越时间窗口（07:00 / 18:00）自动同步主题
+            setInterval(function () {
+                var pref = null;
+                try { pref = localStorage.getItem(THEME_KEY); } catch (e) {}
+                if (pref !== 'light' && pref !== 'dark') {
+                    var auto = getAutoTheme();
+                    if (auto !== currentTheme()) applyTheme(auto);
+                }
+            }, 60000);
+        }
+
+        // --- History Logic ---
+        const STORAGE_KEY = 'gh_proxy_history_v2';
+        const MAX_HISTORY = 50;
+
+        function loadHistory() {
+            try {
+                const data = localStorage.getItem(STORAGE_KEY);
+                return data ? JSON.parse(data) : [];
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function extractFilename(url) {
+            try {
+                const urlObj = new URL(url);
+                const pathParts = urlObj.pathname.split('/');
+                const lastPart = pathParts[pathParts.length - 1];
+                if (lastPart && lastPart.includes('.')) return lastPart;
+                if (pathParts.length > 2) return pathParts[pathParts.length - 2] + '/' + lastPart;
+                return urlObj.hostname;
+            } catch (e) {
+                return url;
+            }
+        }
+
+        function saveHistory(url) {
+            let history = loadHistory();
+            // Remove if exists to move to top
+            history = history.filter(item => item.url !== url);
+            
+            const filename = extractFilename(url);
+            
+            // Add new
+            history.unshift({
+                url: url,
+                filename: filename,
+                time: Date.now()
+            });
+            
+            // Limit size
+            if (history.length > MAX_HISTORY) {
+                history = history.slice(0, MAX_HISTORY);
+            }
+            
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+            renderHistory();
+        }
+
+        function clearHistory() {
+            localStorage.removeItem(STORAGE_KEY);
+            renderHistory();
+        }
+
+        function renderHistory() {
+            const history = loadHistory();
+            const list = document.getElementById('historyList');
+            
+            if (history.length === 0) {
+                list.innerHTML = '<div class="empty-history">暂无访问记录</div>';
+                return;
+            }
+
+            list.innerHTML = '';
+
+            history.forEach(item => {
+                const li = document.createElement('li');
+                li.className = 'history-item';
+                li.onclick = () => {
+                    // Re-use the submit logic but directly with the URL
+                    // Remove protocol for the proxy path
+                    const path = item.url.replace(/^https?:\\/\\//, '');
+                    window.location.href = location.origin + '/' + path;
+                };
+                
+                const timeAgo = getTimeAgo(item.time);
+                
+                li.innerHTML = \`
+                    <div class="history-filename" title="\${item.filename}">\${item.filename}</div>
+                    <div class="history-url" title="\${item.url}">\${item.url}</div>
+                    <div class="history-meta">
+                        <span>\${timeAgo}</span>
+                        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </div>
+                \`;
+                list.appendChild(li);
+            });
+        }
+
+        function getTimeAgo(timestamp) {
+            const seconds = Math.floor((Date.now() - timestamp) / 1000);
+            if (seconds < 60) return '刚刚';
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return minutes + '分钟前';
+            const hours = Math.floor(minutes / 60);
+            if (hours < 24) return hours + '小时前';
+            const days = Math.floor(hours / 24);
+            return days + '天前';
+        }
+
+        // --- Submit Logic ---
         function toSubmit(e){
             e.preventDefault();
             const input = document.getElementsByName('q')[0];
             let val = input.value.trim();
             if(!val) return;
+            
+            // Normalize URL for storage and redirection
+            let originalVal = val;
             if (!val.startsWith('http')) {
                 val = 'https://' + val;
             }
-            window.location.href = location.origin + '/' + val.replace(/^https?:\/\//, '');
+            
+            // Save to history before redirecting
+            saveHistory(val);
+            
+            // Redirect
+            window.location.href = location.origin + '/' + val.replace(/^https?:\\/\\//, '');
         }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function () {
+            renderHistory();
+            initThemeToggle();
+        });
     </script>
 </body>
 </html>`
