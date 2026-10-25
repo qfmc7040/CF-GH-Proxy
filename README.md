@@ -22,6 +22,7 @@
 - 未配置 `GITHUB_TOKEN` 时，GitHub 对同一出口 IP 的匿名 API 额度是 60 次/小时。额度耗尽会返回带重置时间的提示，此时在 Worker 上配置 Secret 即可恢复。
 - 代理请求中，`Authorization` 头只会转发给 `api.github.com`；其他目标（包括 GitHub 的 CDN）会移除该头。
 - 支持 `release-assets.githubusercontent.com`、`github-releases.githubusercontent.com` 等 GitHub Release 下载直链（它们此前不在允许列表里，粘贴直链会 404）。
+- 限流只统计需要回源的请求：命中边缘缓存的请求不计入额度，因此单 IP 额度放宽为 30 秒 300 次。若需要更强的全局防护，建议在 Cloudflare 面板另配原生 Rate Limiting 规则（在边缘层拦截，不占用 Worker 执行时间，且计数全局共享）。
 
 ## Actions Artifact 下载
 
@@ -40,6 +41,8 @@ GitHub 现已强制要求认证才能下载 Actions Artifact，匿名访问只�
 - `https://api.github.com/repos/{owner}/{repo}/actions/artifacts/{artifact_id}` 及其 `/zip` 地址
 
 响应会带上真实的 `Content-Disposition` 文件名、`x-artifact-name`、`x-artifact-digest`，并设置 `Cache-Control: no-store`（Artifact 不缓存）。已过期的 Artifact 返回 `410`。
+
+Artifact 支持断点续传：响应带 `Accept-Ranges: bytes`，带 `Range` 请求头时会把范围转发给 GitHub 的下载 CDN 并返回 `206`。元数据请求与下载请求是并行发出的，省掉一次往返。
 
 > 说明：Token 只会转发给 `api.github.com`；跟随下载重定向离开 GitHub 域名时会自动移除 `Authorization` 头。
 

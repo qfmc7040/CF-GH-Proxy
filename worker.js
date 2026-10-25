@@ -5,7 +5,10 @@ const CONFIG = {
     CACHE_TTL: 604800,
     MAX_CACHE_SIZE: 250 * 1024 * 1024,
     RATE_LIMIT_WINDOW: 30,
-    RATE_LIMIT_MAX: 50,
+    // 只对回源请求计数（缓存命中不计数），因此可以放宽到 10 req/s/IP。
+    // 需要更强的全局防护时，请在 Cloudflare 面板启用原生 Rate Limiting 规则，
+    // 边缘层拦截不占用 Worker 执行时间，且计数是全局的。
+    RATE_LIMIT_MAX: 300,
     IS_PRODUCTION: true,
     ARTIFACT_META_TTL_ANON: 300,
     ARTIFACT_META_TTL_AUTH: 60,
@@ -203,9 +206,6 @@ async function fetchHandler(e) {
     
     if (req.method === 'OPTIONS') return PREFLIGHT_RESP
 
-    const rateLimited = await checkRateLimit(req, e)
-    if (rateLimited) return rateLimited
-
     let path = urlObj.searchParams.get('q')
     
     if (path) {
@@ -244,6 +244,9 @@ async function proxyRequest(e, req, pathname) {
         const artifact = parseArtifactPath(pathname)
 
         if (artifact) {
+            // Artifact 下载不写边缘缓存，每次都会回源，因此在这里计数。
+            const artifactLimited = await checkRateLimit(req, e)
+            if (artifactLimited) return artifactLimited
             return handleArtifactRequest(req, artifact)
         }
 
@@ -279,6 +282,11 @@ async function proxyRequest(e, req, pathname) {
                 return new Response(cached.body, { status: cached.status, headers: hitHeaders })
             }
         }
+
+        // 限流放在缓存查询之后：命中缓存的请求完全不需要计数，
+        // 既省掉两次 Cache API 往返，也避免把纯读取算进额度。
+        const rateLimited = await checkRateLimit(req, e)
+        if (rateLimited) return rateLimited
 
         const reqHdrNew = new Headers(req.headers)
         reqHdrNew.delete('cookie')
@@ -1117,7 +1125,7 @@ function rateLimitResetHint(res) {
     }
 }
 
-async function fetchArtifactZip(downloadUrl, token) {
+async function fetchArtifactZip(downloadUrl, token, rangeHeader) {
     let url = downloadUrl
     let headers = {
         'Accept': 'application/vnd.github+json',
@@ -1149,10 +1157,24 @@ async function fetchArtifactZip(downloadUrl, token) {
             delete headers['Authorization']
         }
 
+        // 真正提供字节流的是 Azure Blob（GitHub API 只做 302 跳转），
+        // 断点续传的 Range 只在离开 api.github.com 之后才带上。
+        if (rangeHeader && nextHost !== 'api.github.com' && !headers['Range']) {
+            headers = { ...headers, 'Range': rangeHeader }
+        }
+
         url = nextUrl.href
     }
 
     return makeRes('Too many redirects while fetching artifact', 508)
+}
+
+function cancelBody(res) {
+    try {
+        if (res && res.body && typeof res.body.cancel === 'function') {
+            res.body.cancel().catch(() => {})
+        }
+    } catch {}
 }
 
 function artifactMetadataError(req, metaRes, meta, info) {
@@ -1179,7 +1201,22 @@ async function handleArtifactRequest(req, artifact) {
     const { owner, repo, artifactId } = artifact
     const token = getArtifactToken(req)
 
-    const { res: metaRes, data: meta } = await fetchArtifactMetadata(owner, repo, artifactId, token)
+    // HEAD 只需要元数据（大小来自元数据即可），发 zip 纯属浪费；GET 才预热。
+    const isGet = req.method === 'GET'
+    const rangeHeader = isGet ? (req.headers.get('range') || '') : ''
+
+    // 元数据与 zip 是两次互相独立的请求，并行发出可省掉一次完整 RTT。
+    // 无 Token 时直接进帮助页，不必打 zip。
+    const metaPromise = fetchArtifactMetadata(owner, repo, artifactId, token)
+    const zipPromise = (token && isGet)
+        ? fetchArtifactZip(
+            `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifactId}/zip`,
+            token,
+            rangeHeader
+        ).catch(err => ({ error: err }))
+        : null
+
+    const { res: metaRes, data: meta } = await metaPromise
     const metaOk = !!(metaRes && metaRes.ok && meta && typeof meta === 'object')
 
     const info = {
@@ -1193,7 +1230,11 @@ async function handleArtifactRequest(req, artifact) {
         runId: (metaOk && meta.workflow_run && meta.workflow_run.id) ? meta.workflow_run.id : null,
     }
 
+    // 任何提前返回都必须丢弃已并行发出的 zip 响应，避免泄漏连接。
+    const dropZip = () => { if (zipPromise) zipPromise.then(r => cancelBody(r)).catch(() => {}) }
+
     if (info.expired) {
+        dropZip()
         return artifactErrorResponse(req, 410, 'Artifact 已过期',
             '该 Actions Artifact 已超过 GitHub 的保留期并被删除，无法再下载。', info)
     }
@@ -1205,6 +1246,7 @@ async function handleArtifactRequest(req, artifact) {
     }
 
     if (metaRes && (metaRes.status === 401 || metaRes.status === 403 || metaRes.status === 404)) {
+        dropZip()
         return artifactMetadataError(req, metaRes, meta, info)
     }
 
@@ -1212,32 +1254,35 @@ async function handleArtifactRequest(req, artifact) {
         return artifactHelpResponse(req, info)
     }
 
+    // 上游真实支持断点续传（Azure Blob 提供字节流），对外如实声明 bytes。
     const headers = new Headers({
         'content-type': 'application/zip',
         'content-disposition': artifactContentDisposition(info.name),
         'cache-control': 'no-store',
         'x-cache-status': 'ARTIFACT',
         'x-artifact-name': encodeURIComponent(info.name),
-        'accept-ranges': 'none',
+        'accept-ranges': 'bytes',
     })
     if (info.size !== null) headers.set('content-length', String(info.size))
     if (info.digest) headers.set('x-artifact-digest', info.digest)
     applyCommonHeaders(headers)
 
     if (req.method === 'HEAD') {
+        dropZip()
         return new Response(null, { status: 200, headers })
     }
 
-    const downloadUrl = (metaOk && meta.archive_download_url)
-        ? String(meta.archive_download_url)
-        : `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifactId}/zip`
-
     let zipRes
     try {
-        zipRes = await fetchArtifactZip(downloadUrl, token)
+        zipRes = await zipPromise
     } catch (err) {
         console.error('Artifact download failed:', err)
         return artifactErrorResponse(req, 502, '下载失败', String((err && err.message) || err), info)
+    }
+
+    if (zipRes && zipRes.error) {
+        console.error('Artifact download failed:', zipRes.error)
+        return artifactErrorResponse(req, 502, '下载失败', String(zipRes.error.message || zipRes.error), info)
     }
 
     if (!zipRes) {
@@ -1264,9 +1309,23 @@ async function handleArtifactRequest(req, artifact) {
     finalHeaders.set('cache-control', 'no-store')
     finalHeaders.set('x-cache-status', 'ARTIFACT')
     finalHeaders.set('x-artifact-name', encodeURIComponent(info.name))
+
+    // 只有上游确实支持时才对外声明 accept-ranges，避免客户端误以为能续传。
+    const upstreamAcceptRanges = zipRes.headers.get('accept-ranges')
+    if (upstreamAcceptRanges) {
+        finalHeaders.set('accept-ranges', upstreamAcceptRanges)
+    } else if (zipRes.status === 206) {
+        finalHeaders.set('accept-ranges', 'bytes')
+    } else {
+        finalHeaders.delete('accept-ranges')
+    }
+
+    // 206 时上游的 content-length 是分片长度，不能被元数据的整体大小覆盖。
     const upstreamLength = zipRes.headers.get('content-length')
     if (upstreamLength && /^\d+$/.test(upstreamLength)) {
         finalHeaders.set('content-length', upstreamLength)
+    } else if (zipRes.status === 206) {
+        finalHeaders.delete('content-length')
     } else if (info.size !== null) {
         finalHeaders.set('content-length', String(info.size))
     }
