@@ -12,6 +12,14 @@ const CONFIG = {
     IS_PRODUCTION: true,
     ARTIFACT_META_TTL_ANON: 300,
     ARTIFACT_META_TTL_AUTH: 60,
+    // Range 请求优先从边缘缓存切片返回，避免断点续传每次都回源。
+    // 置为 false 即恢复旧行为（带 Range 的请求一律回源）。
+    RANGE_CACHE_ENABLED: true,
+    // 从缓存切片时最多允许丢弃的前缀字节：断点续传起点越靠后，
+    // 需要读掉的缓存前缀越多，超过此值就改走回源。
+    RANGE_CACHE_MAX_SKIP: 32 * 1024 * 1024,
+    // 单次从缓存切片的最大长度，防止一次性把超大对象读进内存。
+    RANGE_CACHE_MAX_BYTES: 64 * 1024 * 1024,
 }
 
 const GITHUB_PATTERNS = [
@@ -99,6 +107,146 @@ function newUrl(urlStr) {
         if (!urlStr.startsWith('http')) urlStr = 'https://' + urlStr
         return new URL(urlStr)
     } catch { return null }
+}
+
+// 解析单段 Range 请求头，只支持 `bytes=a-b` / `bytes=a-` / `bytes=-n`。
+// 多段、语法错误一律返回 null 交由调用方回源；起点越界返回 unsatisfiable。
+function parseRangeHeader(header, total) {
+    if (!header || !Number.isFinite(total) || total <= 0) return null
+
+    const match = /^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i.exec(header)
+    if (!match) return null
+
+    const rawStart = match[1]
+    const rawEnd = match[2]
+    if (!rawStart && !rawEnd) return null
+
+    if (!rawStart) {
+        // 后缀范围：bytes=-500 表示最后 500 字节
+        const suffix = parseInt(rawEnd, 10)
+        if (!Number.isFinite(suffix) || suffix <= 0) return null
+        const start = Math.max(total - suffix, 0)
+        return { start, end: total - 1, length: total - start }
+    }
+
+    const start = parseInt(rawStart, 10)
+    if (!Number.isFinite(start) || start < 0) return null
+    if (start >= total) return { unsatisfiable: true }
+
+    let end = rawEnd ? parseInt(rawEnd, 10) : total - 1
+    if (!Number.isFinite(end)) return null
+    if (end >= total) end = total - 1
+    if (end < start) return null
+
+    return { start, end, length: end - start + 1 }
+}
+
+// 从缓存的完整响应体里切出 [start, end]，边读边丢弃前缀。
+// 不做整体缓冲，峰值内存只与单个 chunk 大小相关。
+function sliceCachedResponse(cached, range) {
+    const reader = cached.body.getReader()
+    let offset = 0
+    let sent = 0
+
+    return new ReadableStream({
+        async pull(controller) {
+            try {
+                while (sent < range.length) {
+                    const { done, value } = await reader.read()
+                    if (done) {
+                        controller.close()
+                        return
+                    }
+
+                    const chunkStart = offset
+                    offset += value.byteLength
+
+                    // 整块都在起点之前，直接丢弃
+                    if (offset <= range.start) continue
+
+                    const from = Math.max(range.start - chunkStart, 0)
+                    const to = Math.min(range.end + 1 - chunkStart, value.byteLength)
+                    if (to <= from) continue
+
+                    const piece = value.subarray(from, to)
+                    sent += piece.byteLength
+                    controller.enqueue(piece)
+
+                    if (sent >= range.length) {
+                        controller.close()
+                        reader.cancel().catch(() => {})
+                        return
+                    }
+                }
+                controller.close()
+            } catch (err) {
+                controller.error(err)
+            }
+        },
+        cancel(reason) {
+            return reader.cancel(reason)
+        },
+    })
+}
+
+// 缓存里已有完整对象时，直接切片返回 206，避免断点续传每次回源。
+// 返回 null 表示这个请求不适合走缓存切片，调用方应回源。
+function serveRangeFromCache(req, cached, dynamicCors) {
+    // 301/302 也会被写进缓存，它们的 body 是空的，不能切片。
+    if (cached.status !== 200 || !cached.body) return null
+    // 压缩过的字节偏移和客户端语义不一致，宁可回源。
+    if (cached.headers.get('content-encoding')) return null
+
+    const totalRaw = cached.headers.get('content-length')
+    if (!totalRaw || !/^\d+$/.test(totalRaw)) return null
+    const total = parseInt(totalRaw, 10)
+    if (!Number.isFinite(total) || total <= 0) return null
+
+    const buildHitHeaders = () => {
+        const headers = new Headers(cached.headers)
+        headers.set('x-cache-status', 'HIT')
+        applyCommonHeaders(headers)
+        for (const [k, v] of Object.entries(dynamicCors)) headers.set(k, v)
+        return headers
+    }
+
+    // If-Range 不匹配说明缓存版本已不是客户端要的，按 RFC 返回完整 200。
+    const ifRange = req.headers.get('if-range')
+    if (ifRange) {
+        const cachedEtag = cached.headers.get('etag')
+        const cachedLastModified = cached.headers.get('last-modified')
+        const matched = (cachedEtag && ifRange === cachedEtag) ||
+                        (cachedLastModified && ifRange === cachedLastModified)
+        if (!matched) {
+            const headers = buildHitHeaders()
+            headers.set('x-cache-status', 'HIT-IF-RANGE-MISS')
+            return new Response(cached.body, { status: 200, headers })
+        }
+    }
+
+    const range = parseRangeHeader(req.headers.get('range'), total)
+    if (!range) return null
+
+    if (range.unsatisfiable) {
+        const headers = buildHitHeaders()
+        headers.set('x-cache-status', 'HIT-RANGE-416')
+        headers.set('content-range', `bytes */${total}`)
+        headers.delete('content-length')
+        return new Response(null, { status: 416, headers })
+    }
+
+    // 起点太靠后（要丢弃大量前缀）或切片太长时回源，不占请求生命周期的 I/O。
+    if (range.start > CONFIG.RANGE_CACHE_MAX_SKIP || range.length > CONFIG.RANGE_CACHE_MAX_BYTES) {
+        return null
+    }
+
+    const headers = buildHitHeaders()
+    headers.set('x-cache-status', 'HIT-RANGE')
+    headers.set('accept-ranges', 'bytes')
+    headers.set('content-range', `bytes ${range.start}-${range.end}/${total}`)
+    headers.set('content-length', String(range.length))
+
+    return new Response(sliceCachedResponse(cached, range), { status: 206, headers })
 }
 
 function parseArtifactPath(pathname) {
@@ -262,24 +410,31 @@ async function proxyRequest(e, req, pathname) {
         const dynamicCors = getDynamicCorsHeaders(req, pathname)
 
         const isRangeRequest = !!req.headers.get('range')
+        const rangeCacheEnabled = CONFIG.RANGE_CACHE_ENABLED !== false
 
-        if (cacheable && req.method === 'GET' && !isRangeRequest) {
+        // 带 Range 的请求也查缓存：命中完整对象时直接切片返回 206，不必回源。
+        if (cacheable && req.method === 'GET' && (!isRangeRequest || rangeCacheEnabled)) {
             const cached = await cache.match(cacheKey)
             if (cached) {
-                const clientEtag = req.headers.get('if-none-match')
-                const cachedEtag = cached.headers.get('etag')
-                
-                if (clientEtag && clientEtag === cachedEtag) {
-                    const headers = new Headers({ ...dynamicCors, ...SECURITY_HEADERS, 'etag': cachedEtag, 'x-cache-status': 'HIT-304' })
-                    return new Response(null, { status: 304, headers })
+                if (isRangeRequest) {
+                    const rangeHit = serveRangeFromCache(req, cached, dynamicCors)
+                    if (rangeHit) return rangeHit
+                } else {
+                    const clientEtag = req.headers.get('if-none-match')
+                    const cachedEtag = cached.headers.get('etag')
+
+                    if (clientEtag && clientEtag === cachedEtag) {
+                        const headers = new Headers({ ...dynamicCors, ...SECURITY_HEADERS, 'etag': cachedEtag, 'x-cache-status': 'HIT-304' })
+                        return new Response(null, { status: 304, headers })
+                    }
+
+                    const hitHeaders = new Headers(cached.headers)
+                    hitHeaders.set('x-cache-status', 'HIT')
+                    applyCommonHeaders(hitHeaders)
+                    for (const [k, v] of Object.entries(dynamicCors)) hitHeaders.set(k, v)
+
+                    return new Response(cached.body, { status: cached.status, headers: hitHeaders })
                 }
-                
-                const hitHeaders = new Headers(cached.headers)
-                hitHeaders.set('x-cache-status', 'HIT')
-                applyCommonHeaders(hitHeaders)
-                for (const [k, v] of Object.entries(dynamicCors)) hitHeaders.set(k, v)
-                
-                return new Response(cached.body, { status: cached.status, headers: hitHeaders })
             }
         }
 
