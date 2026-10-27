@@ -1679,8 +1679,8 @@ function serveIndex() {
         <p class="subtitle">加速访问 Releases、Raw 文件、Actions Artifact 及 API 接口</p>
 
         <form id="searchForm" class="search-form" autocomplete="off">
-            <input id="searchInput" class="field" type="text" name="q" placeholder="粘贴 GitHub 链接，例如 https://github.com/user/repo/releases/download/..." required spellcheck="false" aria-label="GitHub 链接">
-            <button class="btn btn-primary" type="submit">加速访问${ICON_ARROW}</button>
+            <input id="searchInput" class="field" type="text" name="q" placeholder="粘贴 GitHub 链接" required spellcheck="false" aria-label="GitHub 链接">
+            <button class="btn btn-primary" type="submit">Go${ICON_ARROW}</button>
         </form>
 
         <div class="links">
