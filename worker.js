@@ -398,7 +398,11 @@ async function proxyRequest(e, req, pathname) {
             return handleArtifactRequest(req, artifact)
         }
 
-        const targetUrl = pathname.startsWith('http') ? pathname : `https://${pathname}`
+        // 从完整 href 提取内嵌目标，避免 urlObj.pathname 将签名参数中的斜杠解码。
+        // Releases 的 per_page/page 及 CDN 签名参数都应原样转发，只有缓存键可忽略 query。
+        const requestUrl = new URL(req.url)
+        const targetPath = requestUrl.href.slice(requestUrl.origin.length + CONFIG.PREFIX.length)
+        const targetUrl = targetPath.startsWith('http') ? targetPath : `https://${targetPath}`
         const urlObj = newUrl(targetUrl)
         if (!urlObj) return makeRes('Invalid target URL', 400)
 

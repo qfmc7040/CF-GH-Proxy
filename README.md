@@ -17,6 +17,7 @@
 ## 缓存与限流
 
 - `api.github.com` 的 JSON 响应不再写入边缘长缓存，始终回源并带 `Cache-Control: no-store`，避免拿到过期的 Star 数、Release 列表等数据。
+- 保留目标 URL 的查询参数，Release 列表可通过 `per_page`、`page` 正常翻页。
 - 其他 GitHub 静态资源仍按原策略缓存。
 - Artifact 元数据会缓存一小段时间（匿名 5 分钟、带 Token 1 分钟），以减少 GitHub API 的调用次数；带 Token 与匿名的缓存互不共用。
 - 未配置 `GITHUB_TOKEN` 时，GitHub 对同一出口 IP 的匿名 API 额度是 60 次/小时。额度耗尽会返回带重置时间的提示，此时在 Worker 上配置 Secret 即可恢复。
