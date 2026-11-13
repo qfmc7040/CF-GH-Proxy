@@ -612,6 +612,354 @@ const ICON_GLOBE = `<svg fill="none" stroke="currentColor" stroke-width="1.8" vi
 const ICON_CLOCK = `<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 const ICON_ARROW = `<svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 5l7 7-7 7M5 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 
+// Release 列表模式的前端脚本。以源码形式注入页面（toString），避免在模板字符串里转义正则。
+function releaseModeClient() {
+    var LS_KEY = 'gh_proxy_release_mode';
+    var PER_PAGE = 20;
+
+    var toggle = document.getElementById('releaseModeToggle');
+    var submitLabel = document.getElementById('submitLabel');
+    var input = document.getElementById('searchInput');
+    var hint = document.getElementById('formHint');
+    var modal = document.getElementById('releaseModal');
+    var modalBody = document.getElementById('releaseBody');
+    var modalTitle = document.getElementById('releaseTitle');
+    var modalSub = document.getElementById('releaseSub');
+    var closeBtn = document.getElementById('releaseClose');
+
+    var state = { enabled: false, repo: null, page: 1, loading: false, items: [], lastFocus: null };
+
+    function readEnabled() {
+        try { return localStorage.getItem(LS_KEY) === '1'; } catch (e) { return false; }
+    }
+    function saveEnabled(on) {
+        try { localStorage.setItem(LS_KEY, on ? '1' : '0'); } catch (e) {}
+    }
+    function setEnabled(on) {
+        state.enabled = !!on;
+        if (toggle) toggle.checked = state.enabled;
+        if (submitLabel) submitLabel.textContent = state.enabled ? '获取列表' : 'Go';
+        if (input) input.placeholder = state.enabled ? '粘贴 GitHub 仓库链接' : '粘贴 GitHub 链接';
+        if (!state.enabled) clearHint();
+    }
+    function showHint(msg, isError) {
+        if (!hint) return;
+        hint.textContent = msg;
+        hint.hidden = !msg;
+        hint.classList.toggle('is-error', !!isError && !!msg);
+    }
+    function clearHint() { showHint(''); }
+
+    function stripHost(value) {
+        var s = String(value == null ? '' : value).trim();
+        if (!s) return '';
+        s = s.replace(/^https?:\/\//i, '');
+        var host = location.host;
+        if (host && s.toLowerCase().indexOf(host.toLowerCase() + '/') === 0) {
+            s = s.slice(host.length + 1);
+        }
+        return s.replace(/^https?:\/\//i, '');
+    }
+
+    // 明确指向具体文件/下载的链接不改走列表，直接按原逻辑下载或预览。
+    function isDirectFile(value) {
+        var s = stripHost(value).toLowerCase();
+        if (!s) return false;
+        return /^(?:raw|gist|codeload)\.githubusercontent\.com\//.test(s) ||
+            /^raw\.github\.com\//.test(s) ||
+            /\/(?:releases\/download|archive|blob|raw|tags|info|git-)\//.test(s) ||
+            /\.(?:zip|tar\.gz|tgz|exe|msi|dmg|apk|deb|rpm|jar|whl)$/.test(s);
+    }
+
+    function parseRepo(value) {
+        var s = stripHost(value);
+        if (!s) return null;
+        var m = /^(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/i.exec(s);
+        if (m) return { owner: m[1], repo: m[2].replace(/\.git$/i, '') };
+        var short = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(s);
+        if (short) return { owner: short[1], repo: short[2] };
+        return null;
+    }
+
+    function proxyUrl(u) {
+        if (!u) return '#';
+        return location.origin + '/' + String(u).replace(/^https?:\/\//i, '');
+    }
+
+    function pad(n) { return n < 10 ? '0' + n : String(n); }
+
+    function formatSize(bytes) {
+        var n = Number(bytes);
+        if (!isFinite(n) || n <= 0) return '';
+        var units = ['B', 'KB', 'MB', 'GB'];
+        var i = 0;
+        while (n >= 1024 && i < units.length - 1) { n = n / 1024; i++; }
+        return (i === 0 ? String(n) : n.toFixed(1)) + ' ' + units[i];
+    }
+
+    function formatDate(iso) {
+        if (!iso) return '';
+        var d = new Date(iso);
+        if (isNaN(d.getTime())) return '';
+        var diff = Math.floor((Date.now() - d.getTime()) / 1000);
+        var abs = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+        if (diff < 60) return '刚刚';
+        if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+        if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+        if (diff < 86400 * 30) return Math.floor(diff / 86400) + ' 天前';
+        return abs;
+    }
+
+    function el(tag, cls, text) {
+        var node = document.createElement(tag);
+        if (cls) node.className = cls;
+        if (text != null) node.textContent = text;
+        return node;
+    }
+
+    function openModal() {
+        if (!modal) return;
+        state.lastFocus = document.activeElement;
+        modal.hidden = false;
+        document.body.classList.add('modal-open');
+        if (closeBtn) closeBtn.focus();
+    }
+    function closeModal() {
+        if (!modal || modal.hidden) return;
+        modal.hidden = true;
+        document.body.classList.remove('modal-open');
+        if (state.lastFocus && state.lastFocus.focus) state.lastFocus.focus();
+        state.lastFocus = null;
+    }
+    function isOpen() { return !!modal && !modal.hidden; }
+
+    function setState(text, isError) {
+        if (!modalBody) return null;
+        modalBody.textContent = '';
+        var box = el('div', 'modal-state' + (isError ? ' error' : ''), text);
+        modalBody.appendChild(box);
+        return box;
+    }
+
+    function renderItem(item, isLatest) {
+        var wrap = el('div', 'release-item');
+
+        var top = el('div', 'release-top');
+        var tag = el('a', 'release-tag', item.tag_name || '(未命名)');
+        tag.href = proxyUrl(item.html_url || '');
+        tag.target = '_blank';
+        tag.rel = 'noopener';
+        top.appendChild(tag);
+
+        if (item.name && item.name !== item.tag_name) {
+            top.appendChild(el('span', 'release-name', item.name));
+        }
+        if (isLatest) top.appendChild(el('span', 'badge badge-latest', '最新'));
+        if (item.prerelease) top.appendChild(el('span', 'badge badge-pre', '预发布'));
+        wrap.appendChild(top);
+
+        var metaParts = [];
+        var when = item.published_at || item.created_at;
+        if (when) metaParts.push(formatDate(when));
+        var author = item.author && item.author.login;
+        if (author) metaParts.push('@' + author);
+        var assets = Array.isArray(item.assets) ? item.assets : [];
+        if (assets.length) metaParts.push(assets.length + ' 个文件');
+        if (metaParts.length) wrap.appendChild(el('div', 'release-meta', metaParts.join(' · ')));
+
+        var bodyText = String(item.body || '').trim();
+        if (bodyText) {
+            var body = el('div', 'release-body clamped', bodyText);
+            wrap.appendChild(body);
+            if (bodyText.length > 400) {
+                var actions = el('div', 'release-actions');
+                var expand = el('button', 'release-toggle', '展开全部');
+                expand.type = 'button';
+                expand.addEventListener('click', function () {
+                    var clamped = body.classList.toggle('clamped');
+                    expand.textContent = clamped ? '展开全部' : '收起';
+                });
+                actions.appendChild(expand);
+                wrap.appendChild(actions);
+            }
+        }
+
+        if (assets.length) {
+            var list = el('div', 'release-assets');
+            assets.forEach(function (asset) {
+                if (!asset || !asset.name) return;
+                var chip = el('a', 'asset-chip');
+                chip.href = proxyUrl(asset.browser_download_url || '');
+                chip.title = asset.name;
+                chip.appendChild(el('span', '', asset.name));
+                var size = formatSize(asset.size);
+                if (size) chip.appendChild(el('em', 'asset-size', size));
+                list.appendChild(chip);
+            });
+            wrap.appendChild(list);
+        }
+        return wrap;
+    }
+
+    function renderItems(items, append) {
+        if (!modalBody) return;
+        if (!append) modalBody.textContent = '';
+        var existingMore = modalBody.querySelector('.modal-foot');
+        if (existingMore) existingMore.parentNode.removeChild(existingMore);
+
+        var latestIndex = -1;
+        if (state.page === 1 && !append) {
+            for (var i = 0; i < items.length; i++) {
+                if (!items[i].prerelease && !items[i].draft) { latestIndex = i; break; }
+            }
+        }
+        items.forEach(function (item, i) {
+            modalBody.appendChild(renderItem(item, i === latestIndex));
+        });
+
+        if (items.length >= PER_PAGE) {
+            var foot = el('div', 'modal-foot');
+            var more = el('button', 'btn', '加载更多');
+            more.type = 'button';
+            more.addEventListener('click', function () {
+                more.disabled = true;
+                more.textContent = '加载中…';
+                loadPage(state.page + 1, true);
+            });
+            foot.appendChild(more);
+            modalBody.appendChild(foot);
+        }
+    }
+
+    function rateLimitMessage(res) {
+        var reset = res && res.headers ? res.headers.get('x-ratelimit-reset') : null;
+        var tail = '';
+        var ts = parseInt(reset, 10);
+        if (isFinite(ts) && ts > 0) {
+            var d = new Date(ts * 1000);
+            tail = '，约 ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' 后恢复';
+        }
+        return 'GitHub API 匿名额度已用尽' + tail + '。请稍后再试，或在请求头带上自己的 Token。';
+    }
+
+    function errorTextFor(status, res) {
+        if (status === 404) return '仓库不存在，或该仓库没有 Release。';
+        if (status === 403 || status === 429) return rateLimitMessage(res);
+        return '获取 Release 失败（HTTP ' + status + '）。';
+    }
+
+    // 翻页失败时只在页脚提示，保留已经渲染出的列表。
+    function showFootError(foot, msg, retryPage) {
+        if (!foot) return;
+        foot.textContent = '';
+        foot.appendChild(el('div', 'modal-state error', msg));
+        var retry = el('button', 'btn', '重试');
+        retry.type = 'button';
+        retry.addEventListener('click', function () {
+            retry.disabled = true;
+            retry.textContent = '加载中…';
+            loadPage(retryPage, true);
+        });
+        foot.appendChild(retry);
+    }
+
+    function loadPage(page, append) {
+        if (!state.repo || state.loading) return;
+        state.loading = true;
+        var placeholder = null;
+        var foot = modalBody ? modalBody.querySelector('.modal-foot') : null;
+        if (!append) placeholder = setState('加载中…', false);
+        else if (foot) foot.textContent = '加载中…';
+
+        var api = location.origin + '/api.github.com/repos/' +
+            encodeURIComponent(state.repo.owner) + '/' + encodeURIComponent(state.repo.repo) +
+            '/releases?per_page=' + PER_PAGE + '&page=' + page;
+
+        fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } })
+            .then(function (res) {
+                if (res.ok) return res.json().then(function (data) { return { ok: true, data: data }; });
+                return res.text().then(function () { return { ok: false, status: res.status, res: res }; });
+            })
+            .then(function (r) {
+                state.loading = false;
+                if (!r.ok) {
+                    var msg = errorTextFor(r.status, r.res);
+                    if (append) showFootError(foot, msg, state.page + 1);
+                    else setState(msg, true);
+                    return;
+                }
+                var list = Array.isArray(r.data) ? r.data : [];
+                if (!append && !list.length) {
+                    setState('该仓库还没有发布 Release', false);
+                    return;
+                }
+                if (append && !list.length) {
+                    if (foot) foot.textContent = '没有更多了';
+                    return;
+                }
+                if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
+                state.page = page;
+                state.items = append ? state.items.concat(list) : list;
+                renderItems(list, append);
+            })
+            .catch(function (err) {
+                state.loading = false;
+                var msg = '网络请求失败：' + (err && err.message ? err.message : '未知错误');
+                if (append) showFootError(foot, msg, state.page + 1);
+                else setState(msg, true);
+            });
+    }
+
+    // 返回值：true = 已接管（打开浮窗或给出提示），false = 交回原有下载逻辑。
+    function openReleaseList(raw) {
+        if (isDirectFile(raw)) {
+            clearHint();
+            return false;
+        }
+        var repo = parseRepo(raw);
+        if (!repo) {
+            clearHint();
+            return false;
+        }
+        clearHint();
+        state.repo = repo;
+        state.page = 1;
+        state.items = [];
+        state.loading = false;
+        if (modalTitle) modalTitle.textContent = repo.owner + '/' + repo.repo;
+        if (modalSub) modalSub.textContent = 'Releases · 数据来自 GitHub API';
+        openModal();
+        loadPage(1, false);
+        return true;
+    }
+
+    setEnabled(readEnabled());
+    if (toggle) {
+        toggle.addEventListener('change', function () {
+            setEnabled(toggle.checked);
+            saveEnabled(state.enabled);
+            if (state.enabled) showHint('已开启：输入仓库链接会列出 Release，文件直链仍按原方式下载', false);
+            else { clearHint(); closeModal(); }
+        });
+    }
+
+    if (modal) {
+        modal.addEventListener('click', function (e) {
+            var t = e.target;
+            if (t && t.getAttribute && t.getAttribute('data-close-modal') !== null) closeModal();
+        });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && isOpen()) closeModal();
+        });
+    }
+
+    window.GHReleaseMode = {
+        enabled: function () { return state.enabled; },
+        open: function (value) { return openReleaseList(value); },
+        close: closeModal
+    };
+}
+
 const THEME_BOOT_JS = "(function(){var k='gh_proxy_theme';var t='dark';try{var p=localStorage.getItem(k);var h=new Date(Date.now()+8*3600*1000).getUTCHours();t=(p==='light'||p==='dark')?p:((h>=7&&h<18)?'light':'dark');}catch(e){}document.documentElement.setAttribute('data-theme',t);})();"
 
 const THEME_TOGGLE_JS = "(function(){var k='gh_proxy_theme';var btn=document.getElementById('themeToggle');if(!btn)return;function cur(){return document.documentElement.getAttribute('data-theme')==='light'?'light':'dark';}function auto(){var h=new Date(Date.now()+8*3600*1000).getUTCHours();return (h>=7&&h<18)?'light':'dark';}btn.addEventListener('click',function(){var n=cur()==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',n);try{localStorage.setItem(k,n);}catch(e){}});btn.addEventListener('dblclick',function(){try{localStorage.removeItem(k);}catch(e){}document.documentElement.setAttribute('data-theme',auto());});setInterval(function(){var p=null;try{p=localStorage.getItem(k);}catch(e){}if(p!=='light'&&p!=='dark'){var a=auto();if(a!==cur())document.documentElement.setAttribute('data-theme',a);}},60000);})();"
@@ -965,7 +1313,7 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
 }
 .search-form .field:hover { border-color: transparent; }
 .search-form .field:focus { border-color: transparent; background: transparent; box-shadow: none; }
-.search-form .btn { flex: none; height: 46px; padding: 0 20px; border-radius: 11px; }
+.search-form .btn { flex: none; height: 46px; padding: 0 20px; border-radius: 11px; white-space: nowrap; }
 .search-form .btn svg { width: 15px; height: 15px; }
 .links {
     display: flex;
@@ -1117,6 +1465,227 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
     opacity: 0.85;
 }
 .history-empty small { display: block; color: var(--text-faint); font-size: 0.74rem; }
+
+.form-hint {
+    margin: 10px 2px 0;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    line-height: 1.55;
+    text-align: center;
+}
+.form-hint.is-error { color: var(--danger); }
+.switch-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    margin-top: 14px;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.switch-row input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.switch {
+    position: relative;
+    flex: none;
+    width: 38px;
+    height: 22px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-2);
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+.switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    transition: transform 0.2s ease, background 0.2s ease;
+}
+.switch-row:hover .switch { border-color: var(--border-strong); }
+.switch-row input:checked + .switch { background: var(--accent-soft); border-color: var(--accent); }
+.switch-row input:checked + .switch::after { transform: translateX(16px); background: var(--accent); }
+.switch-row input:focus-visible + .switch { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.modal {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+}
+.modal[hidden] { display: none; }
+.modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(1, 4, 9, 0.62);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+}
+html[data-theme="light"] .modal-backdrop { background: rgba(31, 35, 40, 0.38); }
+.modal-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: min(720px, 100%);
+    max-height: min(82vh, 760px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg);
+    box-shadow: 0 28px 70px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+    animation: modalIn 0.18s ease;
+}
+html[data-theme="light"] .modal-panel { background: #fff; }
+@keyframes modalIn {
+    from { opacity: 0; transform: translateY(10px) scale(0.99); }
+    to { opacity: 1; transform: none; }
+}
+.modal-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+}
+.modal-title-wrap { flex: 1 1 auto; min-width: 0; }
+.modal-title {
+    color: var(--text);
+    font-size: 0.98rem;
+    font-weight: 700;
+    line-height: 1.45;
+    word-break: break-all;
+}
+.modal-sub {
+    margin-top: 3px;
+    color: var(--text-faint);
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    word-break: break-all;
+}
+.modal-close {
+    flex: none;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.modal-close:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-3); }
+.modal-body {
+    padding: 4px 18px 18px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+.modal-body::-webkit-scrollbar { width: 8px; }
+.modal-body::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+.modal-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 999px; }
+.modal-state { padding: 36px 12px; text-align: center; color: var(--text-dim); font-size: 0.85rem; }
+.modal-state.error { color: var(--danger); }
+.release-item { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.release-item:last-of-type { border-bottom: none; }
+.release-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.release-tag {
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 0.84rem;
+    font-weight: 700;
+}
+.release-name { color: var(--text); font-size: 0.88rem; font-weight: 600; }
+.badge {
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.7;
+}
+.badge-latest { background: var(--accent-soft); color: var(--accent); }
+.badge-pre { background: rgba(210, 153, 34, 0.16); color: #d29922; }
+html[data-theme="light"] .badge-pre { color: #9a6700; }
+.release-meta { margin-top: 5px; color: var(--text-faint); font-size: 0.74rem; }
+.release-body {
+    margin-top: 8px;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+.release-body.clamped { max-height: 7.5em; overflow: hidden; }
+.release-actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; }
+.release-toggle {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.76rem;
+    cursor: pointer;
+}
+.release-assets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.asset-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 0.74rem;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.asset-chip:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-3); }
+.asset-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asset-size { flex: none; color: var(--text-faint); font-size: 0.7rem; font-style: normal; }
+.modal-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 16px 0 4px;
+}
+.modal-foot .modal-state { padding: 0; }
+body.modal-open { overflow: hidden; }
+@media (max-width: 520px) {
+    .search-form .btn { padding: 0 14px; font-size: 0.84rem; }
+    .modal { padding: 10px 8px; }
+    .modal-panel { max-height: 90vh; }
+    .modal-head { padding: 14px; }
+    .modal-body { padding: 2px 14px 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .modal-panel { animation: none; }
+}
+
 @media (max-width: 900px) {
     .shell {
         grid-template-columns: minmax(0, 1fr);
@@ -1175,8 +1744,15 @@ function serveIndex() {
 
         <form id="searchForm" class="search-form" autocomplete="off">
             <input id="searchInput" class="field" type="text" name="q" placeholder="粘贴 GitHub 链接" required spellcheck="false" aria-label="GitHub 链接">
-            <button class="btn btn-primary" type="submit">Go${ICON_ARROW}</button>
+            <button id="submitBtn" class="btn btn-primary" type="submit"><span id="submitLabel">Go</span>${ICON_ARROW}</button>
         </form>
+        <p id="formHint" class="form-hint" role="status" aria-live="polite" hidden></p>
+
+        <label class="switch-row" for="releaseModeToggle" title="开启后，粘贴 GitHub 仓库链接点「获取列表」会列出 Release；Release 文件直链仍直接下载">
+            <input id="releaseModeToggle" type="checkbox" role="switch" aria-label="Release 列表模式">
+            <span class="switch" aria-hidden="true"></span>
+            <span>Release 列表模式</span>
+        </label>
 
         <div class="links">
             <a class="link-chip" href="https://github.com/qfmc7040/CF-GH-Proxy/" target="_blank" rel="noopener">${ICON_GITHUB}项目源码</a>
@@ -1194,6 +1770,20 @@ function serveIndex() {
         <ul id="historyList" class="history-list"></ul>
     </aside>
 </main>
+
+<div id="releaseModal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="releaseTitle">
+        <div class="modal-head">
+            <div class="modal-title-wrap">
+                <div id="releaseTitle" class="modal-title">Release 列表</div>
+                <div id="releaseSub" class="modal-sub"></div>
+            </div>
+            <button id="releaseClose" class="modal-close" type="button" data-close-modal aria-label="关闭">×</button>
+        </div>
+        <div id="releaseBody" class="modal-body"></div>
+    </div>
+</div>
 
 <script>
 (function () {
@@ -1316,6 +1906,11 @@ function serveIndex() {
             e.preventDefault();
             var val = input.value.trim();
             if (!val) return;
+            // Release 列表模式：能识别为仓库链接时打开浮窗，否则继续按原逻辑跳转。
+            if (window.GHReleaseMode && window.GHReleaseMode.enabled() &&
+                window.GHReleaseMode.open(val) === true) {
+                return;
+            }
             if (!/^https?:\\/\\//i.test(val)) val = 'https://' + val;
             saveHistory(val);
             window.location.href = targetUrl(val);
@@ -1325,6 +1920,7 @@ function serveIndex() {
     renderHistory();
 })();
 </script>
+<script>(${releaseModeClient})();</script>
 <script>${THEME_TOGGLE_JS}</script>
 </body>
 </html>`
