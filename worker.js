@@ -1,9 +1,14 @@
+// @ts-nocheck
+// 单文件 Cloudflare Worker：caches.default、FetchEvent、GITHUB_TOKEN 等运行时全局
+// 没有随包类型声明，开 checkJs 会产生大量与运行行为无关的报错，故整文件跳过类型检查。
 'use strict'
 
 const CONFIG = {
     PREFIX: '/',
     CACHE_TTL: 604800,
-    MAX_CACHE_SIZE: 250 * 1024 * 1024,
+    // 超过此大小不写边缘缓存。响应体 tee 的两支共享背压，写缓存那一支慢会
+    // 拖住发给客户端的那一支，大文件下载会因此被限速（实测尤以 Release 资产明显）。
+    CACHE_MAX_SIZE: 32 * 1024 * 1024,
     RATE_LIMIT_WINDOW: 30,
     // 只统计回源请求（缓存命中不计数），约 10 req/s/IP。
     RATE_LIMIT_MAX: 300,
@@ -464,7 +469,7 @@ async function proxyRequest(e, req, pathname) {
                 return new Response(response.body, { status: 206, headers: finalHeaders })
             }
 
-            const shouldCache = contentLength > 0 && contentLength <= CONFIG.MAX_CACHE_SIZE
+            const shouldCache = contentLength > 0 && contentLength <= CONFIG.CACHE_MAX_SIZE
             if (shouldCache && response.body) {
                 finalHeaders.set('Cache-Control', `public, max-age=${CONFIG.CACHE_TTL}`)
                 finalHeaders.set('x-cache-status', 'MISS')
@@ -484,7 +489,7 @@ async function proxyRequest(e, req, pathname) {
                     return new Response(response.body, { status: response.status, headers: finalHeaders })
                 }
             } else {
-                finalHeaders.set('x-cache-status', contentLength > CONFIG.MAX_CACHE_SIZE ? 'STREAM-LARGE' : 'STREAM')
+                finalHeaders.set('x-cache-status', contentLength > CONFIG.CACHE_MAX_SIZE ? 'STREAM-LARGE' : 'STREAM')
                 finalHeaders.delete('set-cookie')
                 return new Response(response.body, { status: response.status, headers: finalHeaders })
             }

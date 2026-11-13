@@ -41,7 +41,7 @@
 
 - `api.github.com` 的 JSON 响应不再写入边缘长缓存，始终回源并带 `Cache-Control: no-store`，避免拿到过期的 Star 数、Release 列表等数据。
 - 保留目标 URL 的查询参数，Release 列表可通过 `per_page`、`page` 正常翻页。
-- 其他 GitHub 静态资源仍按原策略缓存。
+- 其他 GitHub 静态资源仍按原策略缓存，但**只缓存 32 MB 以内的响应**（`CONFIG.CACHE_MAX_SIZE`）。更大的文件直接流式回源，不写边缘缓存：响应体 `tee()` 的两支共享背压，写缓存那一支慢会拖住发给客户端的那一支，大文件下载会被限速。这类响应头带 `x-cache-status: STREAM-LARGE`，可据此确认走的是直通路径。
 - 未配置 Token 时，GitHub 对同一出口 IP 的匿名 API 额度是 60 次/小时；在 Worker 里配置 `GITHUB_TOKEN` 后提升到 5000 次/小时，见上一节。
 - 额度耗尽时 GitHub 返回 `403` 或 `429`，并附带 `x-ratelimit-remaining: 0` 与 `x-ratelimit-reset`（本代理原样透传）。页面只在 `x-ratelimit-remaining` 确实为 `0` 时提示「额度已用尽 + 恢复时间」；403 但仍有额度时，提示的是「仓库被禁用 / 触发二级限流 / 不允许匿名访问」这类真实原因，不再一律归咎于额度。
 - 代理请求中，`Authorization` 头只会转发给 `api.github.com`；其他目标（包括 GitHub 的 CDN）会移除该头。调用方未带该头且 Worker 配置了 `GITHUB_TOKEN` 时，由 Worker 补上，调用方自带的 Token 优先级更高。
