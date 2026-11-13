@@ -101,6 +101,20 @@ function newUrl(urlStr) {
     } catch { return null }
 }
 
+// 部署方可在 Worker 里配置 GITHUB_TOKEN 变量/Secret，用它替代匿名额度。
+// Service Worker 格式下绑定挂在全局作用域；typeof 对未声明的标识符不会抛错。
+function serverGithubToken() {
+    try {
+        if (typeof GITHUB_TOKEN === 'string' && GITHUB_TOKEN.trim()) return GITHUB_TOKEN.trim()
+    } catch (e) { /* 未配置 */ }
+    try {
+        if (typeof env === 'object' && env && typeof env.GITHUB_TOKEN === 'string' && env.GITHUB_TOKEN.trim()) {
+            return env.GITHUB_TOKEN.trim()
+        }
+    } catch (e) { /* 未配置 */ }
+    return ''
+}
+
 // 只解析单段 Range；多段或语法错误返回 null 由调用方回源，起点越界返回 unsatisfiable。
 function parseRangeHeader(header, total) {
     if (!header || !Number.isFinite(total) || total <= 0) return null
@@ -370,7 +384,14 @@ async function proxyRequest(e, req, pathname) {
         reqHdrNew.delete('cookie')
         reqHdrNew.delete('host')
 
-        if (!isApiTarget) {
+        if (isApiTarget) {
+            // 调用方自带的 Authorization 优先；没有则用部署方配置的 Token，
+            // 避免 Cloudflare 共享出口 IP 把匿名的 60 次/小时用光。
+            if (!reqHdrNew.get('authorization')) {
+                const serverToken = serverGithubToken()
+                if (serverToken) reqHdrNew.set('authorization', 'Bearer ' + serverToken)
+            }
+        } else {
             reqHdrNew.delete('authorization')
         }
         const rangeHeader = req.headers.get('range')
@@ -831,20 +852,50 @@ function releaseModeClient() {
         }
     }
 
-    function rateLimitMessage(res) {
-        var reset = res && res.headers ? res.headers.get('x-ratelimit-reset') : null;
-        var tail = '';
-        var ts = parseInt(reset, 10);
-        if (isFinite(ts) && ts > 0) {
-            var d = new Date(ts * 1000);
-            tail = '，约 ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' 后恢复';
-        }
-        return 'GitHub API 匿名额度已用尽' + tail + '。请稍后再试，或在请求头带上自己的 Token。';
+    function headerOf(res, name) {
+        try { return res && res.headers ? res.headers.get(name) : null; } catch (e) { return null; }
     }
 
-    function errorTextFor(status, res) {
+    function clockOf(seconds) {
+        var d = new Date(seconds * 1000);
+        return pad(d.getHours()) + ':' + pad(d.getMinutes());
+    }
+
+    // 只有 x-ratelimit-remaining 归零才是额度用尽；其余 403 另有原因。
+    // 非限流的 403 通常不带 x-ratelimit-* 头，因此不能用 "有 reset 头" 当作判断依据。
+    function isQuotaExhausted(res) {
+        return headerOf(res, 'x-ratelimit-remaining') === '0';
+    }
+
+    function quotaText(res) {
+        var tail = '';
+        var ts = parseInt(headerOf(res, 'x-ratelimit-reset'), 10);
+        if (isFinite(ts) && ts > 0) tail = '，约 ' + clockOf(ts) + ' 后恢复';
+        return 'GitHub API 额度已用尽' + tail + '。' +
+            '未配置 Token 时每个出口 IP 每小时只能请求 60 次；' +
+            '在 Worker 里配置 GITHUB_TOKEN 变量可提升到每小时 5000 次。';
+    }
+
+    function throttledText(res) {
+        var tail = '';
+        var retry = parseInt(headerOf(res, 'retry-after'), 10);
+        if (isFinite(retry) && retry > 0) tail = '，约 ' + retry + ' 秒后再试';
+        return '本站代理请求过于频繁' + tail + '。';
+    }
+
+    function deniedText() {
+        return 'GitHub 拒绝了这次请求（HTTP 403）。' +
+            '常见原因：触发了二级限流、仓库已被禁用，或该仓库不允许匿名访问。';
+    }
+
+    function errorTextFor(status, res, bodyText) {
         if (status === 404) return '仓库不存在，或该仓库没有 Release。';
-        if (status === 403 || status === 429) return rateLimitMessage(res);
+        if (status === 429) {
+            // 本站代理自己的限流返回 JSON {error:"Rate limit exceeded"}。
+            if (bodyText && bodyText.indexOf('Rate limit exceeded') !== -1) return throttledText(res);
+            return isQuotaExhausted(res) ? quotaText(res) : 'GitHub API 限流（HTTP 429）。请稍后再试。';
+        }
+        if (status === 403) return isQuotaExhausted(res) ? quotaText(res) : deniedText();
         return '获取 Release 失败（HTTP ' + status + '）。';
     }
 
@@ -878,12 +929,12 @@ function releaseModeClient() {
         fetch(api, { headers: { 'Accept': 'application/vnd.github+json' } })
             .then(function (res) {
                 if (res.ok) return res.json().then(function (data) { return { ok: true, data: data }; });
-                return res.text().then(function () { return { ok: false, status: res.status, res: res }; });
+                return res.text().then(function (t) { return { ok: false, status: res.status, res: res, body: t }; });
             })
             .then(function (r) {
                 state.loading = false;
                 if (!r.ok) {
-                    var msg = errorTextFor(r.status, r.res);
+                    var msg = errorTextFor(r.status, r.res, r.body);
                     if (append) showFootError(foot, msg, state.page + 1);
                     else setState(msg, true);
                     return;
