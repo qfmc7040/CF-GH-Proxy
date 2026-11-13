@@ -29,9 +29,11 @@
 
 不配置也能用，但所有访客共用 Cloudflare 的出口 IP，匿名额度只有 60 次/小时，很容易被别人用光。
 
-1. 在 GitHub 的 Settings → Developer settings → Personal access tokens 里建一个 Token。**公开仓库的只读访问不需要勾选任何权限**（fine-grained token 不选 scope 即可读公开仓库）。
-2. 在 Cloudflare 控制台打开这个 Worker → Settings → Variables and Secrets，添加变量 `GITHUB_TOKEN`，值填 Token，类型选 **Secret**（加密存储）。
-3. 保存后立即生效，无需改代码。额度提升到 5000 次/小时。
+1. 在 GitHub 建一个 Token：Settings → Developer settings → Personal access tokens。
+   - **Classic token**（`Generate new token (classic)`）：一个 scope 都不用勾。不勾 scope 的 token 只能读公开数据，正好够本代理用。
+   - **Fine-grained token**：Repository access 选 `Public Repositories (read-only)`；只想授权单个仓库就选 `Only select repositories`，并把 `Contents` 设为 `Read-only`（Releases 属于 Contents）。
+2. 在 Cloudflare 控制台 → Workers & Pages → 选中这个 Worker → Settings → Variables and Secrets → Add。Type 选 **Secret**，Variable name 填 `GITHUB_TOKEN`，Value 填 Token。
+3. **点 Deploy 才会生效**，代码不用改。生效后额度提升到每小时 5000 次。
 
 取用顺序：调用方自己带 `Authorization` 就用调用方的，否则用 `GITHUB_TOKEN`。这个头只会发给 `api.github.com`，不会泄漏给 CDN 或其他目标。
 
