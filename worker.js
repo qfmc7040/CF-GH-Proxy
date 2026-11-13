@@ -5,18 +5,14 @@ const CONFIG = {
     CACHE_TTL: 604800,
     MAX_CACHE_SIZE: 250 * 1024 * 1024,
     RATE_LIMIT_WINDOW: 30,
-    // 只对回源请求计数（缓存命中不计数），因此可以放宽到 10 req/s/IP。
-    // 需要更强的全局防护时，请在 Cloudflare 面板启用原生 Rate Limiting 规则，
-    // 边缘层拦截不占用 Worker 执行时间，且计数是全局的。
+    // 只统计回源请求（缓存命中不计数），约 10 req/s/IP。
     RATE_LIMIT_MAX: 300,
     IS_PRODUCTION: true,
-    // Range 请求优先从边缘缓存切片返回，避免断点续传每次都回源。
-    // 置为 false 即恢复旧行为（带 Range 的请求一律回源）。
+    // 置为 false 即回源处理 Range 请求。
     RANGE_CACHE_ENABLED: true,
-    // 从缓存切片时最多允许丢弃的前缀字节：断点续传起点越靠后，
-    // 需要读掉的缓存前缀越多，超过此值就改走回源。
+    // 起点过靠后要丢弃的前缀太多，超过此值改走回源。
     RANGE_CACHE_MAX_SKIP: 32 * 1024 * 1024,
-    // 单次从缓存切片的最大长度，防止一次性把超大对象读进内存。
+    // 单次切片上限，避免把超大对象读进内存。
     RANGE_CACHE_MAX_BYTES: 64 * 1024 * 1024,
 }
 
@@ -105,8 +101,7 @@ function newUrl(urlStr) {
     } catch { return null }
 }
 
-// 解析单段 Range 请求头，只支持 `bytes=a-b` / `bytes=a-` / `bytes=-n`。
-// 多段、语法错误一律返回 null 交由调用方回源；起点越界返回 unsatisfiable。
+// 只解析单段 Range；多段或语法错误返回 null 由调用方回源，起点越界返回 unsatisfiable。
 function parseRangeHeader(header, total) {
     if (!header || !Number.isFinite(total) || total <= 0) return null
 
@@ -118,7 +113,6 @@ function parseRangeHeader(header, total) {
     if (!rawStart && !rawEnd) return null
 
     if (!rawStart) {
-        // 后缀范围：bytes=-500 表示最后 500 字节
         const suffix = parseInt(rawEnd, 10)
         if (!Number.isFinite(suffix) || suffix <= 0) return null
         const start = Math.max(total - suffix, 0)
@@ -137,8 +131,7 @@ function parseRangeHeader(header, total) {
     return { start, end, length: end - start + 1 }
 }
 
-// 从缓存的完整响应体里切出 [start, end]，边读边丢弃前缀。
-// 不做整体缓冲，峰值内存只与单个 chunk 大小相关。
+// 边读边丢弃前缀切出 [start, end]，峰值内存只与单个 chunk 相关。
 function sliceCachedResponse(cached, range) {
     const reader = cached.body.getReader()
     let offset = 0
@@ -157,7 +150,6 @@ function sliceCachedResponse(cached, range) {
                     const chunkStart = offset
                     offset += value.byteLength
 
-                    // 整块都在起点之前，直接丢弃
                     if (offset <= range.start) continue
 
                     const from = Math.max(range.start - chunkStart, 0)
@@ -185,8 +177,7 @@ function sliceCachedResponse(cached, range) {
     })
 }
 
-// 缓存里已有完整对象时，直接切片返回 206，避免断点续传每次回源。
-// 返回 null 表示这个请求不适合走缓存切片，调用方应回源。
+// 缓存命中且是完整对象时直接切出 206；返回 null 表示应回源。
 function serveRangeFromCache(req, cached, dynamicCors) {
     // 301/302 也会被写进缓存，它们的 body 是空的，不能切片。
     if (cached.status !== 200 || !cached.body) return null
@@ -329,8 +320,7 @@ async function fetchHandler(e) {
 
 async function proxyRequest(e, req, pathname) {
     try {
-        // 从完整 href 提取内嵌目标，避免 urlObj.pathname 将签名参数中的斜杠解码。
-        // Releases 的 per_page/page 及 CDN 签名参数都应原样转发，只有缓存键可忽略 query。
+        // 用完整 href 还原目标 URL：避免 pathname 解码签名参数中的斜杠，query 原样转发。
         const requestUrl = new URL(req.url)
         const targetPath = requestUrl.href.slice(requestUrl.origin.length + CONFIG.PREFIX.length)
         const targetUrl = targetPath.startsWith('http') ? targetPath : `https://${targetPath}`
@@ -347,7 +337,6 @@ async function proxyRequest(e, req, pathname) {
         const isRangeRequest = !!req.headers.get('range')
         const rangeCacheEnabled = CONFIG.RANGE_CACHE_ENABLED !== false
 
-        // 带 Range 的请求也查缓存：命中完整对象时直接切片返回 206，不必回源。
         if (cacheable && req.method === 'GET' && (!isRangeRequest || rangeCacheEnabled)) {
             const cached = await cache.match(cacheKey)
             if (cached) {
@@ -373,8 +362,7 @@ async function proxyRequest(e, req, pathname) {
             }
         }
 
-        // 限流放在缓存查询之后：命中缓存的请求完全不需要计数，
-        // 既省掉两次 Cache API 往返，也避免把纯读取算进额度。
+        // 限流放在缓存查询之后：命中缓存不计额度，也省掉两次 Cache API 往返。
         const rateLimited = await checkRateLimit(req, e)
         if (rateLimited) return rateLimited
 
@@ -633,7 +621,7 @@ const PAGE_BASE_CSS = `
     --radius-lg: 18px;
     --radius-md: 12px;
     --radius-sm: 8px;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     --bg: #0d1117;
     --surface: rgba(22, 27, 34, 0.72);
@@ -703,29 +691,38 @@ html { -webkit-text-size-adjust: 100%; }
 body {
     margin: 0;
     min-height: 100vh;
+    min-height: 100dvh;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
     font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.6;
     color: var(--text);
     background-color: var(--bg);
-    background-image: var(--bg-image);
-    background-repeat: no-repeat;
-    background-attachment: fixed;
     -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    transition: color 0.3s ease, background-color 0.3s ease;
 }
-/* 顶部极细网格，给玻璃卡片一点空间参照 */
-body::before {
+body::before,
+body::after {
     content: "";
     position: fixed;
     inset: 0;
+    z-index: 0;
     pointer-events: none;
+}
+body::before {
+    background-image: var(--bg-image);
+    background-repeat: no-repeat;
+    background-size: cover;
+}
+body::after {
     background-image:
         linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
         linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
     background-size: 52px 52px;
     -webkit-mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 20%, transparent 78%);
     mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 20%, transparent 78%);
-    z-index: 0;
+}
+@supports not ((-webkit-mask-image: none) or (mask-image: none)) {
+    body::after { background-image: none; }
 }
 h1, h2, h3, p, dl, dd, ul { margin: 0; }
 ul { padding: 0; list-style: none; }
@@ -829,8 +826,8 @@ html[data-theme="light"] .code-block { background: rgba(31, 35, 40, 0.05); }
 
 .theme-toggle {
     position: fixed;
-    top: 16px;
-    right: 16px;
+    top: max(16px, env(safe-area-inset-top, 0px));
+    right: max(16px, env(safe-area-inset-right, 0px));
     width: 42px;
     height: 42px;
     display: inline-flex;
@@ -922,9 +919,6 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-4px); }
 }
-@media (prefers-reduced-motion: reduce) {
-    .brand { animation: none; }
-}
 .title {
     margin: 0;
     text-align: center;
@@ -1007,7 +1001,7 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
     padding-top: 16px;
     border-top: 1px solid var(--border);
     text-align: center;
-    color: var(--text-faint);
+    color: var(--text-dim);
     font-size: 0.77rem;
     letter-spacing: 0.01em;
     line-height: 1.6;
@@ -1103,7 +1097,7 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.history-time { margin-top: 5px; color: var(--text-faint); font-size: 0.72rem; }
+.history-time { margin-top: 5px; color: var(--text-dim); font-size: 0.72rem; }
 .history-empty {
     display: flex;
     flex-direction: column;
@@ -1143,6 +1137,22 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
     .search-form .btn { width: 100%; }
     .history-card { padding: 16px 14px; }
 }
+@media (prefers-reduced-motion: reduce) {
+    .brand { animation: none; }
+    .theme-toggle,
+    .btn,
+    .history-item,
+    .link-chip {
+        transition: none;
+    }
+    .theme-toggle:hover,
+    .btn:active,
+    .btn-primary:active,
+    .history-item:hover,
+    .history-item:focus-visible {
+        transform: none;
+    }
+}
 `
 
 function serveIndex() {
@@ -1150,7 +1160,7 @@ function serveIndex() {
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>GitHub 加速代理</title>
 <script>${THEME_BOOT_JS}</script>
 <style>${PAGE_BASE_CSS}${HOME_CSS}</style>
