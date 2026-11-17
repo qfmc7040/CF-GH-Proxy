@@ -722,6 +722,7 @@ function releaseModeClient() {
         var s = stripHost(value).toLowerCase();
         if (!s) return false;
         return /^(?:raw|gist|codeload)\.githubusercontent\.com\//.test(s) ||
+            /^codeload\.github\.com\//.test(s) ||
             /^raw\.github\.com\//.test(s) ||
             /\/(?:releases\/download|archive|blob|raw|tags|info|git-)\//.test(s) ||
             /\.(?:zip|tar\.gz|tgz|exe|msi|dmg|apk|deb|rpm|jar|whl)$/.test(s);
@@ -1024,8 +1025,7 @@ function releaseModeClient() {
         toggle.addEventListener('change', function () {
             setEnabled(toggle.checked);
             saveEnabled(state.enabled);
-            if (state.enabled) showHint('已开启：输入仓库链接会列出 Release，文件直链仍按原方式下载', false);
-            else { clearHint(); closeModal(); }
+            if (!state.enabled) { clearHint(); closeModal(); }
         });
     }
 
