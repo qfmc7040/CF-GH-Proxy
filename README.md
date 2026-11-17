@@ -42,7 +42,8 @@
 - `api.github.com` 的响应默认仍不写边缘缓存，直接回源并带 `Cache-Control: no-store`，避免拿到过期的 Star 数等数据。
 - 唯一例外是 Release 列表（`/repos/{owner}/{repo}/releases`）：它每次打开页面都会打一次 API，而匿名额度只有 60 次/小时，所以对它做 60 秒边缘短缓存（`CONFIG.API_CACHE_TTL`，与 GitHub 自己响应头里的 `max-age=60` 对齐），响应头带 `x-cache-status: MISS-API`。其余 API 路径不受影响，仍标 `BYPASS-API`。
 - 调用方**自带 `Authorization`** 时既读不到也写不进这层缓存，避免把某个身份的数据发给别人；只有用部署方 `GITHUB_TOKEN` 取到的结果才会被缓存。
-- 保留目标 URL 的查询参数，Release 列表可通过 `per_page`、`page` 正常翻页。
+- 缓存键带完整查询参数（此前只取 pathname，导致 `?per_page=6` 与 `?per_page=2` 撞成同一个键、翻页与每页条数全部失效）。静态下载链接的签名参数仍由 `buildCacheKey` 内部清空，不会制造垃圾条目。
+- 命中缓存时用当前配置重写 API 的 `Cache-Control`，不信任条目里存的旧值：否则一次错误的 `max-age` 会让这个键在边缘滞留很久。
 - 其他 GitHub 静态资源仍按原策略缓存，但**只缓存 32 MB 以内的响应**（`CONFIG.CACHE_MAX_SIZE`）。更大的文件直接流式回源，不写边缘缓存：响应体 `tee()` 的两支共享背压，写缓存那一支慢会拖住发给客户端的那一支，大文件下载会被限速。这类响应头带 `x-cache-status: STREAM-LARGE`，可据此确认走的是直通路径。
 - 超过 32 MB 的响应虽不进边缘缓存，但会补一个 `Cache-Control: public, max-age=86400`（`CONFIG.LARGE_CACHE_TTL`）交给浏览器，同一个文件重复下载不必再经过 Worker。GitHub 的下载源本身不发 `Cache-Control`，没有这个头浏览器每次都会重新拉。
 - 未配置 Token 时，GitHub 对同一出口 IP 的匿名 API 额度是 60 次/小时；在 Worker 里配置 `GITHUB_TOKEN` 后提升到 5000 次/小时，见上一节。

@@ -361,8 +361,13 @@ async function proxyRequest(e, req, pathname) {
             !req.headers.get('authorization') && isCacheableApiPath(urlObj)
 
         const cache = caches.default
-        const cacheKey = buildCacheKey(pathname)
-        const dynamicCors = getDynamicCorsHeaders(req, pathname)
+        // 必须用完整目标 URL（含 query）：buildCacheKey 收到的若只是 pathname，
+        // api.github.com/repos/o/r/releases?per_page=10 与 ?per_page=100 会撞成同一个键，
+        // 后到的请求直接拿到别人的分页结果。静态资产的 search 由 buildCacheKey 内部清空，
+        // 签名参数不会因此产生垃圾条目。
+        const cacheKey = buildCacheKey(urlObj.href)
+        // 同理，getDynamicCorsHeaders 靠 query 里的 token 判断私有资源，也要完整 URL。
+        const dynamicCors = getDynamicCorsHeaders(req, urlObj.href)
 
         const isRangeRequest = !!req.headers.get('range')
         const rangeCacheEnabled = CONFIG.RANGE_CACHE_ENABLED !== false
@@ -383,6 +388,10 @@ async function proxyRequest(e, req, pathname) {
                     }
 
                     const hitHeaders = new Headers(cached.headers)
+                    // API 命中时用当前配置重写缓存时长，不信任条目里存的 Cache-Control：
+                    // 旧版本部署（或误判分支）写进去的长 max-age 会把这个键锁死很久，
+                    // 与 API_CACHE_TTL 的 60 秒语义冲突。
+                    if (isApiTarget) hitHeaders.set('cache-control', `public, max-age=${CONFIG.API_CACHE_TTL}`)
                     hitHeaders.set('x-cache-status', 'HIT')
                     applyCommonHeaders(hitHeaders)
                     for (const [k, v] of Object.entries(dynamicCors)) hitHeaders.set(k, v)
