@@ -39,13 +39,17 @@
 
 ## 缓存与限流
 
-- `api.github.com` 的 JSON 响应不再写入边缘长缓存，始终回源并带 `Cache-Control: no-store`，避免拿到过期的 Star 数、Release 列表等数据。
+- `api.github.com` 的响应默认仍不写边缘缓存，直接回源并带 `Cache-Control: no-store`，避免拿到过期的 Star 数等数据。
+- 唯一例外是 Release 列表（`/repos/{owner}/{repo}/releases`）：它每次打开页面都会打一次 API，而匿名额度只有 60 次/小时，所以对它做 60 秒边缘短缓存（`CONFIG.API_CACHE_TTL`，与 GitHub 自己响应头里的 `max-age=60` 对齐），响应头带 `x-cache-status: MISS-API`。其余 API 路径不受影响，仍标 `BYPASS-API`。
+- 调用方**自带 `Authorization`** 时既读不到也写不进这层缓存，避免把某个身份的数据发给别人；只有用部署方 `GITHUB_TOKEN` 取到的结果才会被缓存。
 - 保留目标 URL 的查询参数，Release 列表可通过 `per_page`、`page` 正常翻页。
 - 其他 GitHub 静态资源仍按原策略缓存，但**只缓存 32 MB 以内的响应**（`CONFIG.CACHE_MAX_SIZE`）。更大的文件直接流式回源，不写边缘缓存：响应体 `tee()` 的两支共享背压，写缓存那一支慢会拖住发给客户端的那一支，大文件下载会被限速。这类响应头带 `x-cache-status: STREAM-LARGE`，可据此确认走的是直通路径。
+- 超过 32 MB 的响应虽不进边缘缓存，但会补一个 `Cache-Control: public, max-age=86400`（`CONFIG.LARGE_CACHE_TTL`）交给浏览器，同一个文件重复下载不必再经过 Worker。GitHub 的下载源本身不发 `Cache-Control`，没有这个头浏览器每次都会重新拉。
 - 未配置 Token 时，GitHub 对同一出口 IP 的匿名 API 额度是 60 次/小时；在 Worker 里配置 `GITHUB_TOKEN` 后提升到 5000 次/小时，见上一节。
 - 额度耗尽时 GitHub 返回 `403` 或 `429`，并附带 `x-ratelimit-remaining: 0` 与 `x-ratelimit-reset`（本代理原样透传）。页面只在 `x-ratelimit-remaining` 确实为 `0` 时提示「额度已用尽 + 恢复时间」；403 但仍有额度时，提示的是「仓库被禁用 / 触发二级限流 / 不允许匿名访问」这类真实原因，不再一律归咎于额度。
 - 代理请求中，`Authorization` 头只会转发给 `api.github.com`；其他目标（包括 GitHub 的 CDN）会移除该头。调用方未带该头且 Worker 配置了 `GITHUB_TOKEN` 时，由 Worker 补上，调用方自带的 Token 优先级更高。
 - 支持 `release-assets.githubusercontent.com`、`github-releases.githubusercontent.com` 等 GitHub Release 下载直链（它们此前不在允许列表里，粘贴直链会 404）。
+- 首页 HTML 也带 `Cache-Control: public, max-age=3600`（`CONFIG.INDEX_TTL`）。首页是纯静态模板，缓存后刷新不再触发 Worker 执行，可直接省每日请求额度；代价是改了首页样式后老访客最长要等 1 小时才看到新版本，改版期间可临时把该项调成 0。
 - 限流只统计需要回源的请求：命中边缘缓存的请求不计入额度，因此单 IP 额度放宽为 30 秒 300 次。若需要更强的全局防护，建议在 Cloudflare 面板另配原生 Rate Limiting 规则（在边缘层拦截，不占用 Worker 执行时间，且计数全局共享）。
 - 带 `Range` 的请求也会先查边缘缓存：若缓存里已有完整对象，直接从缓存切片返回 `206`，不再回源（响应头 `x-cache-status: HIT-RANGE`）。起点偏移超过 32 MB、单次切片超过 64 MB、缓存对象经过 gzip 压缩、或请求是多段 Range 时，仍走回源。把 `CONFIG.RANGE_CACHE_ENABLED` 设为 `false` 即可整体关闭该行为。`If-Range` 与缓存版本不匹配时按 RFC 返回完整 `200`。
 

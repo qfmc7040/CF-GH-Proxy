@@ -19,6 +19,13 @@ const CONFIG = {
     RANGE_CACHE_MAX_SKIP: 32 * 1024 * 1024,
     // 单次切片上限，避免把超大对象读进内存。
     RANGE_CACHE_MAX_BYTES: 64 * 1024 * 1024,
+    // 首页 HTML 允许浏览器强缓存：命中时请求不再发到 Worker，也不占用每日请求额度。
+    // 改了首页样式后，老访客最长要等这么久才能看到新版本，改版期间可临时调成 0。
+    INDEX_TTL: 3600,
+    // api.github.com 只对 Release 列表做短缓存，量级取 GitHub 自己响应头里的 60 秒。
+    API_CACHE_TTL: 60,
+    // 超过 CACHE_MAX_SIZE 的大文件不写边缘缓存，但让浏览器自己存一份。
+    LARGE_CACHE_TTL: 86400,
 }
 
 const GITHUB_PATTERNS = [
@@ -348,6 +355,10 @@ async function proxyRequest(e, req, pathname) {
 
         const isApiTarget = urlObj.hostname.toLowerCase() === 'api.github.com'
         const cacheable = !isApiTarget
+        // 调用方自带 Authorization 时不读也不写 API 缓存：同一个 URL 对不同身份
+        // 可能返回不同数据，缓存里只放用部署方 Token 取到的结果。
+        const apiCacheable = isApiTarget && req.method === 'GET' &&
+            !req.headers.get('authorization') && isCacheableApiPath(urlObj)
 
         const cache = caches.default
         const cacheKey = buildCacheKey(pathname)
@@ -356,7 +367,7 @@ async function proxyRequest(e, req, pathname) {
         const isRangeRequest = !!req.headers.get('range')
         const rangeCacheEnabled = CONFIG.RANGE_CACHE_ENABLED !== false
 
-        if (cacheable && req.method === 'GET' && (!isRangeRequest || rangeCacheEnabled)) {
+        if ((cacheable || apiCacheable) && req.method === 'GET' && (!isRangeRequest || rangeCacheEnabled)) {
             const cached = await cache.match(cacheKey)
             if (cached) {
                 if (isRangeRequest) {
@@ -415,36 +426,39 @@ async function proxyRequest(e, req, pathname) {
             }
         }, 0)
 
-        if ([301, 302, 303, 307, 308].includes(response.status)) {
-             const location = response.headers.get('location')
-             if (location) {
-                 const nextUrl = new URL(location, urlObj.href)
-                 const isSafe = SAFE_REDIRECT_HOSTS.has(nextUrl.hostname) || 
-                                GITHUB_PATTERNS.some(p => p.test(nextUrl.href)) || 
-                                isSafeAzureRedirect(nextUrl.hostname)
-                 
-                 if (isSafe) {
-                     const redirHeaders = new Headers(response.headers)
-                     applyCommonHeaders(redirHeaders)
-                     for (const [k, v] of Object.entries(dynamicCors)) redirHeaders.set(k, v)
-
-                     if (cacheable) {
-                         e.waitUntil(cache.put(cacheKey, new Response(null, {
-                             status: response.status,
-                             headers: redirHeaders
-                         })).catch(err => console.warn('Cache redirect failed', err)))
-                     }
-
-                     return new Response(null, { status: response.status, headers: redirHeaders })
-                 }
-             }
-        }
-
+        // handleProxyFetch 内部已递归跟随安全重定向（见 handleProxyFetch），
+        // 只有非安全目标才会以 3xx 返回，因此这里不再重复处理重定向。
         if (isApiTarget) {
             const apiHeaders = new Headers(response.headers)
+            apiHeaders.delete('set-cookie')
+
+            if (apiCacheable && response.ok && response.body) {
+                // 只缓存部署方 Token 取到的公开数据；命中分支会用当前请求的 Origin
+                // 重写 CORS 头，所以存进去的副本去掉 allow-origin 与 vary。
+                const cacheHeaders = new Headers(apiHeaders)
+                cacheHeaders.delete('access-control-allow-origin')
+                cacheHeaders.delete('vary')
+                cacheHeaders.set('cache-control', `public, max-age=${CONFIG.API_CACHE_TTL}`)
+
+                applyCommonHeaders(apiHeaders)
+                for (const [k, v] of Object.entries(dynamicCors)) apiHeaders.set(k, v)
+                apiHeaders.set('cache-control', `public, max-age=${CONFIG.API_CACHE_TTL}`)
+                apiHeaders.set('x-cache-status', 'MISS-API')
+
+                try {
+                    const [forClient, forCache] = response.body.tee()
+                    e.waitUntil(cache.put(cacheKey, new Response(forCache, {
+                        status: response.status,
+                        headers: cacheHeaders
+                    })).catch(err => console.warn('Cache API response failed', err)))
+                    return new Response(forClient, { status: response.status, headers: apiHeaders })
+                } catch (teeErr) {
+                    console.warn('API tee failed:', teeErr)
+                }
+            }
+
             apiHeaders.set('x-cache-status', 'BYPASS-API')
             apiHeaders.set('cache-control', 'no-store')
-            apiHeaders.delete('set-cookie')
             applyCommonHeaders(apiHeaders)
             for (const [k, v] of Object.entries(dynamicCors)) apiHeaders.set(k, v)
             return new Response(response.body, { status: response.status, headers: apiHeaders })
@@ -488,8 +502,16 @@ async function proxyRequest(e, req, pathname) {
                     finalHeaders.set('x-cache-status', 'BYPASS-TEE-ERROR')
                     return new Response(response.body, { status: response.status, headers: finalHeaders })
                 }
+            } else if (contentLength > CONFIG.CACHE_MAX_SIZE) {
+                // 大文件不写边缘缓存（tee 会拖慢下载），但让浏览器自己存一份：
+                // 重复下载直接命中本地缓存，不再经过 Worker。GitHub 的下载源本身
+                // 不发 Cache-Control，没有这一行浏览器每次都会重新拉。
+                finalHeaders.set('cache-control', `public, max-age=${CONFIG.LARGE_CACHE_TTL}`)
+                finalHeaders.set('x-cache-status', 'STREAM-LARGE')
+                finalHeaders.delete('set-cookie')
+                return new Response(response.body, { status: response.status, headers: finalHeaders })
             } else {
-                finalHeaders.set('x-cache-status', contentLength > CONFIG.CACHE_MAX_SIZE ? 'STREAM-LARGE' : 'STREAM')
+                finalHeaders.set('x-cache-status', 'STREAM')
                 finalHeaders.delete('set-cookie')
                 return new Response(response.body, { status: response.status, headers: finalHeaders })
             }
@@ -573,6 +595,14 @@ function buildCacheKey(pathname) {
     } catch { 
         return new Request(`https://fallback.invalid/${pathname}`, { method: 'GET' }) 
     }
+}
+
+// 只给 API 里"列表型、可容忍几十秒延迟"的路径开短缓存。
+// Release 列表每次打开页面都会打一次 api.github.com，匿名额度只有 60 次/小时。
+function isCacheableApiPath(urlObj) {
+    try {
+        return /^\/repos\/[^/]+\/[^/]+\/releases\/?$/i.test(urlObj.pathname)
+    } catch { return false }
 }
 
 function getDynamicCorsHeaders(req, targetUrl) {
@@ -2008,6 +2038,8 @@ function serveIndex() {
         status: 200,
         headers: {
             'content-type': 'text/html; charset=utf-8',
+            // 首页是纯静态模板，浏览器强缓存后刷新不再产生 Worker 请求，直接省每日额度。
+            'cache-control': `public, max-age=${CONFIG.INDEX_TTL}`,
             ...CORS_HEADERS,
             ...SECURITY_HEADERS
         }
