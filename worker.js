@@ -1016,9 +1016,9 @@ function releaseModeClient() {
     };
 }
 
-const THEME_BOOT_JS = "(function(){var k='gh_proxy_theme';var t='dark';try{var p=localStorage.getItem(k);var h=new Date(Date.now()+8*3600*1000).getUTCHours();t=(p==='light'||p==='dark')?p:((h>=7&&h<18)?'light':'dark');}catch(e){}document.documentElement.setAttribute('data-theme',t);})();"
+const THEME_BOOT_JS = "(function(){var k='gh_proxy_theme',r=document.documentElement,t='dark';try{var p=localStorage.getItem(k);if(p==='light'||p==='dark'){t=p}else{var q=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)');if(q){t=q.matches?'dark':'light'}else{var h=new Date(Date.now()+8*3600*1000).getUTCHours();t=(h>=7&&h<18)?'light':'dark'}}}catch(e){}r.setAttribute('data-theme',t)})();"
 
-const THEME_TOGGLE_JS = "(function(){var k='gh_proxy_theme';var btn=document.getElementById('themeToggle');if(!btn)return;function cur(){return document.documentElement.getAttribute('data-theme')==='light'?'light':'dark';}function auto(){var h=new Date(Date.now()+8*3600*1000).getUTCHours();return (h>=7&&h<18)?'light':'dark';}btn.addEventListener('click',function(){var n=cur()==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',n);try{localStorage.setItem(k,n);}catch(e){}});btn.addEventListener('dblclick',function(){try{localStorage.removeItem(k);}catch(e){}document.documentElement.setAttribute('data-theme',auto());});setInterval(function(){var p=null;try{p=localStorage.getItem(k);}catch(e){}if(p!=='light'&&p!=='dark'){var a=auto();if(a!==cur())document.documentElement.setAttribute('data-theme',a);}},60000);})();"
+const THEME_TOGGLE_JS = "(function(){var k='gh_proxy_theme';var btn=document.getElementById('themeToggle');if(!btn)return;function cur(){return document.documentElement.getAttribute('data-theme')==='light'?'light':'dark';}function auto(){var q=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)');if(q){return q.matches?'dark':'light';}var h=new Date(Date.now()+8*3600*1000).getUTCHours();return (h>=7&&h<18)?'light':'dark';}btn.addEventListener('click',function(){var n=cur()==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',n);try{localStorage.setItem(k,n);}catch(e){}});btn.addEventListener('dblclick',function(){try{localStorage.removeItem(k);}catch(e){}document.documentElement.setAttribute('data-theme',auto());});setInterval(function(){var p=null;try{p=localStorage.getItem(k);}catch(e){}if(p!=='light'&&p!=='dark'){var a=auto();if(a!==cur())document.documentElement.setAttribute('data-theme',a);}},60000);})();"
 
 const PAGE_BASE_CSS = `
 :root {
@@ -1052,7 +1052,7 @@ const PAGE_BASE_CSS = `
     --bg-image:
         radial-gradient(900px 520px at 8% -12%, rgba(88, 166, 255, 0.20), transparent 62%),
         radial-gradient(760px 460px at 92% -8%, rgba(130, 80, 223, 0.20), transparent 64%),
-        radial-gradient(900px 620px at 50% 108%, rgba(63, 185, 80, 0.10), transparent 66%);
+        radial-gradient(900px 620px at 50% 108%, rgba(63, 185, 80, 0.06), transparent 66%);
     --grid-line: rgba(255, 255, 255, 0.045);
     --hero-glow: rgba(88, 166, 255, 0.22);
     color-scheme: dark;
@@ -1091,18 +1091,31 @@ html[data-theme="light"] {
 }
 
 *, *::before, *::after { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    scrollbar-gutter: stable;
+}
 body {
     margin: 0;
+    display: flex;
+    isolation: isolate;
     min-height: 100vh;
-    min-height: 100dvh;
+    min-height: 100svh;
     padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+    overflow-x: clip;
     font-family: var(--font-sans);
     font-size: 16px;
     line-height: 1.6;
     color: var(--text);
     background-color: var(--bg);
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+@supports not (overflow: clip) {
+    body { overflow-x: hidden; }
 }
 body::before,
 body::after {
@@ -1115,18 +1128,19 @@ body::after {
 body::before {
     background-image: var(--bg-image);
     background-repeat: no-repeat;
-    background-size: cover;
+    background-size: auto;
 }
 body::after {
     background-image:
         linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
         linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
     background-size: 52px 52px;
-    -webkit-mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 20%, transparent 78%);
-    mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 20%, transparent 78%);
+    opacity: 0.75;
+    -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.55) 24%, transparent 70%);
+    mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.55) 24%, transparent 70%);
 }
 @supports not ((-webkit-mask-image: none) or (mask-image: none)) {
-    body::after { background-image: none; }
+    body::after { opacity: 0.55; }
 }
 h1, h2, h3, p, dl, dd, ul { margin: 0; }
 ul { padding: 0; list-style: none; }
@@ -1142,7 +1156,7 @@ a { color: var(--accent); text-decoration: none; }
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-    transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+    transition: background 0.3s ease, border-color 0.3s ease;
 }
 html[data-theme="light"] .card { box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.9); }
 
@@ -1257,7 +1271,6 @@ html[data-theme="light"] .theme-toggle .icon-moon { opacity: 1; transform: rotat
 `
 
 const HOME_CSS = `
-.page-home { display: flex; }
 .shell {
     position: relative;
     z-index: 1;
@@ -1293,7 +1306,6 @@ const HOME_CSS = `
     z-index: -1;
     inset: 0;
     border-radius: inherit;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 42%);
     pointer-events: none;
 }
 html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba(255, 255, 255, 0.6), transparent 46%); }
@@ -1738,8 +1750,15 @@ body.modal-open { overflow: hidden; }
     .modal-head { padding: 14px; }
     .modal-body { padding: 2px 14px 14px; }
 }
-@media (prefers-reduced-motion: reduce) {
-    .modal-panel { animation: none; }
+@media (max-width: 520px), (prefers-reduced-transparency: reduce) {
+    .card,
+    .theme-toggle {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+    }
+    .card { background: var(--bg); }
+    html[data-theme="light"] .card { background: #fff; }
+    .theme-toggle { background: var(--bg); }
 }
 
 @media (max-width: 900px) {
@@ -1761,9 +1780,11 @@ body.modal-open { overflow: hidden; }
     .search-form { flex-direction: column; padding: 8px; }
     .search-form .btn { width: 100%; }
     .history-card { padding: 16px 14px; }
+    .field { height: 48px; font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
     .brand { animation: none; }
+    .modal-panel { animation: none; }
     .theme-toggle,
     .btn,
     .history-item,
@@ -1786,12 +1807,15 @@ function serveIndex() {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
 <title>GitHub 加速代理</title>
 <script>${THEME_BOOT_JS}</script>
 <style>${PAGE_BASE_CSS}${HOME_CSS}</style>
 </head>
-<body class="page-home">
-<button id="themeToggle" class="theme-toggle" type="button" title="切换白天/夜间模式（双击恢复按时间自动切换）" aria-label="切换白天/夜间模式">${ICON_SUN}${ICON_MOON}</button>
+<body>
+<button id="themeToggle" class="theme-toggle" type="button" title="切换白天/夜间模式（双击恢复自动切换）" aria-label="切换白天/夜间模式">${ICON_SUN}${ICON_MOON}</button>
 
 <main class="shell">
     <section class="card hero">
