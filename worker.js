@@ -26,6 +26,11 @@ const CONFIG = {
     API_CACHE_TTL: 60,
     // 超过 CACHE_MAX_SIZE 的大文件不写边缘缓存，但让浏览器自己存一份。
     LARGE_CACHE_TTL: 86400,
+    // Actions Artifacts 下载：部署方 PAT 具备 Actions: read 时才真正可用。
+    // 策略是"仅公开仓库"——私有仓库的构建产物绝不经由本代理外泄。
+    ARTIFACT_DOWNLOAD_ENABLED: true,
+    // 公开性判定的边缘缓存时长。仓库由公开转私有后，最长要等这么久才失效。
+    ARTIFACT_REPO_TTL: 86400,
 }
 
 const GITHUB_PATTERNS = [
@@ -409,13 +414,26 @@ async function proxyRequest(e, req, pathname) {
         reqHdrNew.delete('cookie')
         reqHdrNew.delete('host')
 
-        if (isApiTarget) {
-            // 调用方自带的 Authorization 优先；没有则用部署方配置的 Token，
-            // 避免 Cloudflare 共享出口 IP 把匿名的 60 次/小时用光。
-            if (!reqHdrNew.get('authorization')) {
-                const serverToken = serverGithubToken()
-                if (serverToken) reqHdrNew.set('authorization', 'Bearer ' + serverToken)
+        // 调用方自带的 Authorization 始终优先，也不借用部署方 Token。
+        const callerToken = reqHdrNew.get('authorization')
+
+        // Actions Artifacts 下载：用了部署方 Token 时只放行公开仓库。
+        // 调用方自带 Token 时由调用方自己的权限决定，不做拦截。
+        const artifactTarget = artifactDownloadTarget(urlObj)
+        if (artifactTarget && !callerToken && CONFIG.ARTIFACT_DOWNLOAD_ENABLED !== false) {
+            if (!(await isPublicRepo(artifactTarget.owner, artifactTarget.repo, e))) {
+                return makeRes(JSON.stringify({
+                    error: 'Forbidden',
+                    message: 'Only public repositories can be downloaded through this proxy.',
+                }), 403, { 'content-type': 'application/json; charset=utf-8' })
             }
+        }
+
+        if (isApiTarget) {
+            // 没有调用方 Token 时用部署方配置的 Token，避免 Cloudflare 共享出口 IP
+            // 把匿名的 60 次/小时用光。
+            const serverToken = serverGithubToken()
+            if (!callerToken && serverToken) reqHdrNew.set('authorization', 'Bearer ' + serverToken)
         } else {
             reqHdrNew.delete('authorization')
         }
@@ -614,6 +632,59 @@ function isCacheableApiPath(urlObj) {
     } catch { return false }
 }
 
+// Actions Artifacts 下载路径：/repos/{owner}/{repo}/actions/artifacts/{id}/zip
+// 只有这个形状的请求才需要做"是否公开仓库"的判定，其余 API 路径不受影响。
+function artifactDownloadTarget(urlObj) {
+    try {
+        if (urlObj.hostname.toLowerCase() !== 'api.github.com') return null
+        const m = /^\/repos\/([^/]+)\/([^/]+)\/actions\/artifacts\/[^/]+\/zip\/?$/i.exec(urlObj.pathname)
+        if (!m) return null
+        return { owner: decodeURIComponent(m[1]), repo: decodeURIComponent(m[2]) }
+    } catch {
+        return null
+    }
+}
+
+// 仅公开仓库：部署方 PAT 一旦带 Actions 读权限，私有仓库的 artifact 会变成
+// 任何访客都能下载的公开链接，所以下载前先确认仓库是公开的。
+// 判定结果按 TTL 缓存；查不到（404 / 额度耗尽 / 网络错误）一律按不可用处理。
+async function isPublicRepo(owner, repo, event) {
+    const cache = caches.default
+    const cacheKey = new Request(
+        `https://cache.internal/repo-visibility/${owner.toLowerCase()}/${repo.toLowerCase()}`,
+        { method: 'GET' }
+    )
+    try {
+        const cached = await cache.match(cacheKey)
+        if (cached) return (await cached.text()) === 'public'
+    } catch (e) { /* 缓存读失败就回源 */ }
+
+    try {
+        const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+        const headers = new Headers({
+            'accept': 'application/vnd.github+json',
+            'user-agent': 'CF-GH-Proxy',
+        })
+        const serverToken = serverGithubToken()
+        if (serverToken) headers.set('authorization', 'Bearer ' + serverToken)
+
+        const res = await fetch(apiUrl, { headers })
+        if (!res.ok) return false
+
+        const data = await res.json()
+        const isPublic = !!data && data.private === false
+
+        event.waitUntil(cache.put(cacheKey, new Response(isPublic ? 'public' : 'private', {
+            headers: { 'cache-control': `public, max-age=${CONFIG.ARTIFACT_REPO_TTL}` },
+        })).catch(err => console.warn('Repo visibility cache failed:', err)))
+
+        return isPublic
+    } catch (err) {
+        console.warn('Repo visibility check failed:', err)
+        return false
+    }
+}
+
 function getDynamicCorsHeaders(req, targetUrl) {
     try {
         const url = newUrl(targetUrl)
@@ -632,11 +703,19 @@ function getDynamicCorsHeaders(req, targetUrl) {
     return { ...CORS_HEADERS }
 }
 
+// Authorization 只允许发给 api.github.com：跟随 302 到 Azure Blob 等下载域时
+// 必须重新算一次，否则部署方 PAT 会被一起发出去，也会和 SAS 鉴权打架。
+function headersForTarget(urlObj, init) {
+    const headers = new Headers(init.headers || {})
+    if (urlObj.hostname.toLowerCase() !== 'api.github.com') headers.delete('authorization')
+    return { ...init, headers }
+}
+
 async function handleProxyFetch(urlObj, init, redirectCount) {
     if (redirectCount > 5) return makeRes('Too many redirects', 508)
     
     try {
-        const res = await fetch(urlObj.href, init)
+        const res = await fetch(urlObj.href, headersForTarget(urlObj, init))
         
         if ([301, 302, 303, 307, 308].includes(res.status)) {
             const location = res.headers.get('location')

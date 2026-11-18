@@ -32,10 +32,40 @@
 1. 在 GitHub 建一个 Token：Settings → Developer settings → Personal access tokens。
    - **Classic token**（`Generate new token (classic)`）：一个 scope 都不用勾。不勾 scope 的 token 只能读公开数据，正好够本代理用。
    - **Fine-grained token**：Repository access 选 `Public Repositories (read-only)`；只想授权单个仓库就选 `Only select repositories`，并把 `Contents` 设为 `Read-only`（Releases 属于 Contents）。
+   - 如果还要支持 Actions Artifacts 下载，权限需要再加一层，见下面「Actions Artifacts 下载」一节。
 2. 在 Cloudflare 控制台 → Workers & Pages → 选中这个 Worker → Settings → Variables and Secrets → Add。Type 选 **Secret**，Variable name 填 `GITHUB_TOKEN`，Value 填 Token。
 3. **点 Deploy 才会生效**，代码不用改。生效后额度提升到每小时 5000 次。
 
 取用顺序：调用方自己带 `Authorization` 就用调用方的，否则用 `GITHUB_TOKEN`。这个头只会发给 `api.github.com`，不会泄漏给 CDN 或其他目标。
+
+## Actions Artifacts 下载
+
+可以直接走本代理下载 GitHub Actions 的构建产物（artifact）：
+
+```
+/<你的 Worker 域名>/api.github.com/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip
+```
+
+也可以直接把 `https://api.github.com/repos/.../actions/artifacts/.../zip` 粘进首页输入框。
+
+**需要的权限**：下载 artifact 走的是 `api.github.com`，但所需的 token 权限比读 Releases 更高。
+
+- Classic token：勾 `repo` scope（不勾的话只能读公开数据，但 artifact 接口仍会拒绝）。
+- Fine-grained token：在 `Contents: Read-only` 之外，再加 `Actions: Read-only`。
+
+**只放行公开仓库**：`GITHUB_TOKEN` 一旦具备 Actions 读权限，私有仓库的构建产物就会变成「任何拿到本代理域名的人都能下载」。因此用部署方 Token 下载 artifact 时，会先请求 `/repos/{owner}/{repo}` 确认 `private === false`：
+
+- 公开仓库：正常 302 跳转到 Azure 下载域并流式返回。
+- 私有仓库、或仓库不存在、或查询失败（额度耗尽、网络错误）：返回 `403` 与 `Only public repositories can be downloaded through this proxy.`。
+- 判定结果按 `CONFIG.ARTIFACT_REPO_TTL`（86400 秒）写边缘缓存。仓库由公开转为私有后，最长要等这么久才会被拒绝，介意的话把这个值调小。
+- 调用方**自带 `Authorization`** 时不做这项检查，能不能下载由调用方 Token 自己的权限决定。
+
+其他说明：
+
+- 想整体关掉这个能力，把 `CONFIG.ARTIFACT_DOWNLOAD_ENABLED` 设为 `false`。
+- artifact 下载响应标 `BYPASS-API` + `no-store`，不进边缘缓存，不会被匿名请求复用。
+- 超过 32 MB 的 artifact 按大文件策略直通，标 `STREAM-LARGE`。
+- 重定向到 `*.blob.core.windows.net` 的下载链接只在 query 里带 SAS 签名，**不带** `Authorization`。该头在跟随 302 时会重新按目标域名剥离，不会随重定向泄漏给 Azure 或其他下载域。
 
 ## 缓存与限流
 
@@ -48,7 +78,7 @@
 - 超过 32 MB 的响应虽不进边缘缓存，但会补一个 `Cache-Control: public, max-age=86400`（`CONFIG.LARGE_CACHE_TTL`）交给浏览器，同一个文件重复下载不必再经过 Worker。GitHub 的下载源本身不发 `Cache-Control`，没有这个头浏览器每次都会重新拉。
 - 未配置 Token 时，GitHub 对同一出口 IP 的匿名 API 额度是 60 次/小时；在 Worker 里配置 `GITHUB_TOKEN` 后提升到 5000 次/小时，见上一节。
 - 额度耗尽时 GitHub 返回 `403` 或 `429`，并附带 `x-ratelimit-remaining: 0` 与 `x-ratelimit-reset`（本代理原样透传）。页面只在 `x-ratelimit-remaining` 确实为 `0` 时提示「额度已用尽 + 恢复时间」；403 但仍有额度时，提示的是「仓库被禁用 / 触发二级限流 / 不允许匿名访问」这类真实原因，不再一律归咎于额度。
-- 代理请求中，`Authorization` 头只会转发给 `api.github.com`；其他目标（包括 GitHub 的 CDN）会移除该头。调用方未带该头且 Worker 配置了 `GITHUB_TOKEN` 时，由 Worker 补上，调用方自带的 Token 优先级更高。
+- 代理请求中，`Authorization` 头只会转发给 `api.github.com`；其他目标（包括 GitHub 的 CDN、Azure 下载域）会移除该头。跟随 302 重定向时每一跳都会重新按目标域名判断一次，不会因为源站是 `api.github.com` 就把 Token 带到跳转后的域名。调用方未带该头且 Worker 配置了 `GITHUB_TOKEN` 时，由 Worker 补上，调用方自带的 Token 优先级更高。
 - 支持 `release-assets.githubusercontent.com`、`github-releases.githubusercontent.com` 等 GitHub Release 下载直链（它们此前不在允许列表里，粘贴直链会 404）。
 - 首页 HTML 也带 `Cache-Control: public, max-age=3600`（`CONFIG.INDEX_TTL`）。首页是纯静态模板，缓存后刷新不再触发 Worker 执行，可直接省每日请求额度；代价是改了首页样式后老访客最长要等 1 小时才看到新版本，改版期间可临时把该项调成 0。
 - 限流只统计需要回源的请求：命中边缘缓存的请求不计入额度，因此单 IP 额度放宽为 30 秒 300 次。若需要更强的全局防护，建议在 Cloudflare 面板另配原生 Rate Limiting 规则（在边缘层拦截，不占用 Worker 执行时间，且计数全局共享）。
