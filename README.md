@@ -22,9 +22,12 @@
    - **Fine-grained token**：Repository access 选 `Public Repositories (read-only)`；只想授权单个仓库就选 `Only select repositories`，并把 `Contents` 设为 `Read-only`（Releases 属于 Contents）。
    - 如果还要支持 Actions Artifacts 下载，权限需要再加一层，见[Actions Artifacts 下载](https://github.com/qfmc7040/CF-GH-Proxy/blob/main/README.md#actions-artifacts-%E4%B8%8B%E8%BD%BD)。
 
-   [权限参考图](\image\Fine-grained personal access tokens.png)
+![Fine-grained personal access tokens](image/Fine-grained%20personal%20access%20tokens.png)
 
 2. 在 Cloudflare 控制台 → Workers & Pages → 选中这个 Worker → Settings → Variables and Secrets → Add。Type 选 **Secret**，Variable name 填 `GITHUB_TOKEN`，Value 填 Token。
+
+![cloudflare](image/cloudflare配置.png)
+
 3. **点 Deploy 才会生效**，代码不用改。生效后额度提升到每小时 5000 次。
 
 取用顺序：调用方自己带 `Authorization` 就用调用方的，否则用 `GITHUB_TOKEN`。这个头只会发给 `api.github.com`，不会泄漏给 CDN 或其他目标。
