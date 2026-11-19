@@ -10,14 +10,14 @@
 ## Workers 部署方法
 ### 部署 Cloudflare Worker：
 
-   - 在 Cloudflare Worker 控制台中创建一个新的 Worker。
+   - 在 [Cloudflare Worker](https://dash.cloudflare.com/) 控制台中创建一个新的 Worker。
    - 将 [worker.js](./worker.js) 的内容粘贴到 Worker 编辑器中。
 
 ### 配置 GITHUB_TOKEN（推荐）
 
 不配置也能用，但所有访客共用 Cloudflare 的出口 IP，匿名额度只有 60 次/小时，很容易被别人用光。
 
-1. 在 GitHub 建一个 Token：Settings → Developer settings → Personal access tokens。
+1. 在 GitHub 建一个 Token：Settings → Developer settings → [Personal access tokens](https://github.com/settings/personal-access-tokens)。
    - **Classic token**（`Generate new token (classic)`）：一个 scope 都不用勾。不勾 scope 的 token 只能读公开数据，正好够本代理用。
    - **Fine-grained token**：Repository access 选 `Public Repositories (read-only)`；只想授权单个仓库就选 `Only select repositories`，并把 `Contents` 设为 `Read-only`（Releases 属于 Contents）。
    - 如果还要支持 Actions Artifacts 下载，权限需要再加一层，见[Actions Artifacts 下载](https://github.com/qfmc7040/CF-GH-Proxy/blob/main/README.md#actions-artifacts-%E4%B8%8B%E8%BD%BD)。
