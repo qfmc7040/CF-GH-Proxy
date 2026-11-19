@@ -1528,6 +1528,39 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
 }
 .search-form .field:hover { border-color: transparent; }
 .search-form .field:focus { border-color: transparent; background: transparent; box-shadow: none; }
+.search-field {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    min-width: 0;
+}
+.search-field .field { width: 100%; padding-right: 44px; }
+.field-clear {
+    position: absolute;
+    top: 50%;
+    right: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    transform: translateY(-50%);
+    transition: background 0.16s ease, color 0.16s ease;
+}
+.field-clear:hover { background: var(--surface-3); color: var(--text); }
+.field-clear:active { background: var(--accent-soft); }
+.field-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.field-clear[hidden] { display: none; }
 .search-form .btn { flex: none; height: 46px; padding: 0 20px; border-radius: 11px; white-space: nowrap; }
 .search-form .btn svg { width: 15px; height: 15px; }
 .links {
@@ -1971,7 +2004,10 @@ function serveIndex() {
         <p class="subtitle">支持 API、Git Clone、Releases、Archive、Gist、Raw、Artifacts 等资源加速下载</p>
 
         <form id="searchForm" class="search-form" autocomplete="off">
-            <input id="searchInput" class="field" type="text" name="q" placeholder="粘贴 GitHub 链接" required spellcheck="false" aria-label="GitHub 链接">
+            <div class="search-field">
+                <input id="searchInput" class="field" type="text" name="q" placeholder="粘贴 GitHub 链接" required spellcheck="false" aria-label="GitHub 链接">
+                <button id="clearInput" class="field-clear" type="button" hidden aria-label="清空输入内容" title="清空">×</button>
+            </div>
             <button id="submitBtn" class="btn btn-primary" type="submit"><span id="submitLabel">Go</span>${ICON_ARROW}</button>
         </form>
         <p id="formHint" class="form-hint" role="status" aria-live="polite" hidden></p>
@@ -2020,6 +2056,24 @@ function serveIndex() {
     var list = document.getElementById('historyList');
     var form = document.getElementById('searchForm');
     var input = document.getElementById('searchInput');
+    var clearBtn = document.getElementById('clearInput');
+
+    // 输入框清空按钮：有内容时才显示「×」，点击后清空并保持焦点。
+    function syncClearButton() {
+        if (!clearBtn || !input) return;
+        clearBtn.hidden = input.value === '';
+    }
+    if (input) input.addEventListener('input', syncClearButton);
+    if (clearBtn && input) {
+        // 用 mousedown 阻止默认行为，避免点击时输入框失焦、光标跳回开头。
+        clearBtn.addEventListener('mousedown', function (e) { e.preventDefault(); });
+        clearBtn.addEventListener('click', function () {
+            input.value = '';
+            syncClearButton();
+            input.focus();
+        });
+    }
+    syncClearButton();
 
     function loadHistory() {
         try {
