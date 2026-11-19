@@ -7,18 +7,6 @@
 
 ![黑](image/黑.png)
 
-
-## Release 列表模式
-
-首页输入框下方有「Release 列表模式」开关（状态存在浏览器 localStorage，键名 `gh_proxy_release_mode`）。
-
-- 开启后，按钮文字由 `Go` 变为 `获取列表`；输入 `github.com/owner/repo` 或 `owner/repo` 后提交，不再跳转，而是在浮窗里列出该仓库的 Release。
-- 浮窗里每个 Release 显示 tag、标题、发布时间、作者、文件数量和已折叠的更新说明（超过 400 字可展开），以及各附件的大小；附件与 tag 链接都按本代理格式改写后再打开。每页 20 条，滚到底部可「加载更多」，翻页失败时保留已加载内容并给出「重试」。
-- 数据来自本代理的 `/api.github.com/repos/<owner>/<repo>/releases`，因此同样受 `per_page`、`page` 与匿名额度限制；额度耗尽时浮窗内会提示 `x-ratelimit-reset` 对应的恢复时间。
-- 关闭开关后按钮恢复 `Go`，行为与之前完全一致。
-- 明确指向具体文件的链接不会被拦截，仍按原方式下载或预览：`releases/download/...`、`archive/...`、`blob/...`、`raw/...`、`tags/...`、`info/...`、`git-...` 以及 `raw.githubusercontent.com`、`codeload.github.com`、`gist.githubusercontent.com`、`raw.github.com` 的子路径，和以常见压缩包/安装包后缀结尾的链接。
-- 无法识别为仓库的输入也不会进入浮窗，按原有逻辑跳转。
-
 ## Workers 部署方法
 ### 部署 Cloudflare Worker：
 
@@ -37,6 +25,17 @@
 3. **点 Deploy 才会生效**，代码不用改。生效后额度提升到每小时 5000 次。
 
 取用顺序：调用方自己带 `Authorization` 就用调用方的，否则用 `GITHUB_TOKEN`。这个头只会发给 `api.github.com`，不会泄漏给 CDN 或其他目标。
+
+## Release 列表模式
+
+首页输入框下方有「Release 列表模式」开关（状态存在浏览器 localStorage，键名 `gh_proxy_release_mode`）。
+
+- 开启后，按钮文字由 `Go` 变为 `获取列表`；输入 `github.com/owner/repo` 或 `owner/repo` 后提交，不再跳转，而是在浮窗里列出该仓库的 Release。
+- 浮窗里每个 Release 显示 tag、标题、发布时间、作者、文件数量和已折叠的更新说明（超过 400 字可展开），以及各附件的大小；附件与 tag 链接都按本代理格式改写后再打开。每页 20 条，滚到底部可「加载更多」，翻页失败时保留已加载内容并给出「重试」。
+- 数据来自本代理的 `/api.github.com/repos/<owner>/<repo>/releases`，因此同样受 `per_page`、`page` 与匿名额度限制；额度耗尽时浮窗内会提示 `x-ratelimit-reset` 对应的恢复时间。
+- 关闭开关后按钮恢复 `Go`，行为与之前完全一致。
+- 明确指向具体文件的链接不会被拦截，仍按原方式下载或预览：`releases/download/...`、`archive/...`、`blob/...`、`raw/...`、`tags/...`、`info/...`、`git-...` 以及 `raw.githubusercontent.com`、`codeload.github.com`、`gist.githubusercontent.com`、`raw.github.com` 的子路径，和以常见压缩包/安装包后缀结尾的链接。
+- 无法识别为仓库的输入也不会进入浮窗，按原有逻辑跳转。
 
 ## Actions Artifacts 下载
 
