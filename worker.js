@@ -2056,18 +2056,19 @@ function serveIndex() {
     var list = document.getElementById('historyList');
     var form = document.getElementById('searchForm');
     var input = document.getElementById('searchInput');
-    var clearBtn = document.getElementById('clearInput');
+    // 注意：不要命名为 clearBtn，后面的历史记录「清空」按钮用的是同名变量。
+    var clearInputBtn = document.getElementById('clearInput');
 
     // 输入框清空按钮：有内容时才显示「×」，点击后清空并保持焦点。
     function syncClearButton() {
-        if (!clearBtn || !input) return;
-        clearBtn.hidden = input.value === '';
+        if (!clearInputBtn || !input) return;
+        clearInputBtn.hidden = input.value === '';
     }
     if (input) input.addEventListener('input', syncClearButton);
-    if (clearBtn && input) {
+    if (clearInputBtn && input) {
         // 用 mousedown 阻止默认行为，避免点击时输入框失焦、光标跳回开头。
-        clearBtn.addEventListener('mousedown', function (e) { e.preventDefault(); });
-        clearBtn.addEventListener('click', function () {
+        clearInputBtn.addEventListener('mousedown', function (e) { e.preventDefault(); });
+        clearInputBtn.addEventListener('click', function () {
             input.value = '';
             syncClearButton();
             input.focus();
