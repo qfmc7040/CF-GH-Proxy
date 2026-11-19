@@ -20,7 +20,7 @@
 1. 在 GitHub 建一个 Token：Settings → Developer settings → Personal access tokens。
    - **Classic token**（`Generate new token (classic)`）：一个 scope 都不用勾。不勾 scope 的 token 只能读公开数据，正好够本代理用。
    - **Fine-grained token**：Repository access 选 `Public Repositories (read-only)`；只想授权单个仓库就选 `Only select repositories`，并把 `Contents` 设为 `Read-only`（Releases 属于 Contents）。
-   - 如果还要支持 Actions Artifacts 下载，权限需要再加一层，见下面「Actions Artifacts 下载」一节。
+   - 如果还要支持 Actions Artifacts 下载，权限需要再加一层，见[Actions Artifacts 下载](https://github.com/qfmc7040/CF-GH-Proxy/blob/main/README.md#actions-artifacts-%E4%B8%8B%E8%BD%BD)。
 2. 在 Cloudflare 控制台 → Workers & Pages → 选中这个 Worker → Settings → Variables and Secrets → Add。Type 选 **Secret**，Variable name 填 `GITHUB_TOKEN`，Value 填 Token。
 3. **点 Deploy 才会生效**，代码不用改。生效后额度提升到每小时 5000 次。
 
