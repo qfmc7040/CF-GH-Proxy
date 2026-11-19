@@ -1496,12 +1496,13 @@ html[data-theme="light"] .hero::after { background: linear-gradient(180deg, rgba
     .title { color: var(--text); background: none; }
 }
 .subtitle {
-    max-width: 34ch;
+    max-width: 42rem;
     margin: 12px auto 0;
     text-align: center;
     color: var(--text-dim);
     font-size: 0.9rem;
     line-height: 1.7;
+    text-wrap: pretty;
 }
 .search-form {
     display: flex;
@@ -1967,6 +1968,7 @@ function serveIndex() {
     <section class="card hero">
         <div class="brand" aria-hidden="true">${ICON_GITHUB}</div>
         <h1 class="title">GitHub 加速代理</h1>
+        <p class="subtitle">支持 API、Git Clone、Releases、Archive、Gist、Raw、Artifacts 等资源加速下载</p>
 
         <form id="searchForm" class="search-form" autocomplete="off">
             <input id="searchInput" class="field" type="text" name="q" placeholder="粘贴 GitHub 链接" required spellcheck="false" aria-label="GitHub 链接">
