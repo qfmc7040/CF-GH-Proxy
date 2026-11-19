@@ -326,6 +326,12 @@ async function fetchHandler(e) {
             hostnameMatch = ALLOWED_HOSTNAMES.includes(new URL(normalizedPath).hostname.toLowerCase()) 
         } catch {}
         
+        // 网页版 artifact 地址不能直接下载，先换成 API zip 再做正常代理跳转。
+        const artifactZip = artifactPageDownloadUrl(normalizedPath)
+        if (artifactZip) {
+            return Response.redirect('https://' + urlObj.host + CONFIG.PREFIX + artifactZip, 302)
+        }
+
         if (patternMatch && hostnameMatch) {
             return Response.redirect('https://' + urlObj.host + CONFIG.PREFIX + normalizedPath, 301)
         }
@@ -339,7 +345,13 @@ async function fetchHandler(e) {
     path = rawPath.replace(/^\//, '').replace(/^https?:\/+/, 'https://')
 
     if (!path) return serveIndex()
-    
+
+    // 网页版 artifact 地址（GITHUB_PATTERNS 不认这种形状），302 到对应的 API zip。
+    const artifactZipTarget = artifactPageDownloadUrl(path)
+    if (artifactZipTarget) {
+        return Response.redirect('https://' + urlObj.host + CONFIG.PREFIX + artifactZipTarget, 302)
+    }
+
     if (GITHUB_PATTERNS.some(p => p.test(path))) {
         return proxyRequest(e, req, path)
     }
@@ -630,6 +642,22 @@ function isCacheableApiPath(urlObj) {
     try {
         return /^\/repos\/[^/]+\/[^/]+\/releases\/?$/i.test(urlObj.pathname)
     } catch { return false }
+}
+
+// Actions Runs 页面里的 artifact 链接：
+// github.com/{owner}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}
+// 网页上的下载按钮是 JS 调 API，地址本身不能直接下载。这里换成对应的 API zip
+// 路径并 302 过去，粘贴网页地址也能直接下载。
+function artifactPageDownloadUrl(path) {
+    try {
+        const m = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/actions\/runs\/\d+\/artifacts\/(\d+)\/?$/i.exec(path)
+        if (!m) return null
+        const owner = encodeURIComponent(decodeURIComponent(m[1]))
+        const repo = encodeURIComponent(decodeURIComponent(m[2]))
+        return `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${m[3]}/zip`
+    } catch {
+        return null
+    }
 }
 
 // Actions Artifacts 下载路径：/repos/{owner}/{repo}/actions/artifacts/{id}/zip

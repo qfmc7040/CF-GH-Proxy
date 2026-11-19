@@ -48,6 +48,17 @@
 
 也可以直接把 `https://api.github.com/repos/.../actions/artifacts/.../zip` 粘进首页输入框。
 
+**网页地址也能直接用**：GitHub Actions 页面里的 artifact 链接是
+`https://github.com/{owner}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}`，
+在网页上点「下载」是前端 JS 另发请求，这个地址本身拿不到文件。本代理会把这种地址自动 302 到对应的 API zip 路径，所以下面两种写法等价：
+
+```
+/<你的 Worker 域名>/https://github.com/{owner}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}
+/<你的 Worker 域名>/https://api.github.com/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip
+```
+
+跳转只换地址，不放宽校验：落地的 API zip 请求仍要过下面的「只放行公开仓库」检查。
+
 **需要的权限**：下载 artifact 走的是 `api.github.com`，但所需的 token 权限比读 Releases 更高。
 
 - Classic token：勾 `repo` scope（不勾的话只能读公开数据，但 artifact 接口仍会拒绝）。
