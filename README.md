@@ -18,10 +18,12 @@
 不配置也能用，但所有访客共用 Cloudflare 的出口 IP，匿名额度只有 60 次/小时，很容易被别人用光。
 
 1. 在 GitHub 建一个 Token：Settings → Developer settings → [Personal access tokens](https://github.com/settings/personal-access-tokens)。
-   - **Classic token**（`Generate new token (classic)`）：一个 scope 都不用勾。不勾 scope 的 token 只能读公开数据，正好够本代理用。
-   - **Fine-grained token**：Repository access 勾选 `Public Repositories`（即可访问所有公开仓库，可下载公开仓库的Artifacts）。
-   ![Fine-grained personal access tokens](image/Fine-grained%20personal%20access%20tokens.png)
-   - 如果还要支持私有仓库的 Actions Artifacts 下载，Repository access需要勾选`All repositories`（可访问所有私有仓库）/`Only select repositories`（仅增加选中的私有仓库的访问权限），权限给 `Permissions` → `Repositories` → Add permissions `Actions: Read-only`，如需下载私有仓库release另增 `Contents: Read-only`
+   - **Classic token**（`Generate new token (classic)`）：只读公开数据一个 scope 都不用勾；要下载私有仓库的 Actions Artifacts，勾 `repo`（`repo` 已包含 Actions 读权限）。
+   - **Fine-grained token**：这个 Token 能访问哪些仓库，就等于本代理能代理哪些仓库——两个部分共同决定，缺一不可：
+     - `Repository access`：`Public Repositories`（只有公开仓库）/ `All repositories`（含私有仓库）/ `Only select repositories`（只放行勾选的那些仓库，公开私有都可以）。
+     - `Permissions` → `Repositories` → Add permissions → `Actions: Read-only`（下载 Actions Artifacts 必需）；如需用本代理下载私有仓库的 Release 附件，再加 `Contents: Read-only`。
+     ![Fine-grained personal access tokens](image/Fine-grained%20personal%20access%20tokens.png)
+   - 举例：只想放行一个私有仓库的构建产物，就选 `Only select repositories` 并勾那个仓库，再给 `Actions: Read-only`。此时其他仓库的 artifact 下载会被上游拒绝（404/403），本代理不再做公开性判断，完全按这个 Token 的实际权限走。
 
 
 
@@ -63,20 +65,21 @@
 /<你的 Worker 域名>/https://api.github.com/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip
 ```
 
-跳转只换地址，不放宽校验：落地的 API zip 请求仍要过下面的「只放行公开仓库」检查。
+跳转只换地址，不放宽校验：落地的 API zip 请求仍要过下面的总开关。
 
-**只放行公开仓库**：`GITHUB_TOKEN` 一旦具备 Actions 读权限，私有仓库的构建产物就会变成「任何拿到本代理域名的人都能下载」。因此用部署方 Token 下载 artifact 时，会先请求 `/repos/{owner}/{repo}` 确认 `private === false`：
+**可下载范围由 Token 的权限决定**：本代理不再按仓库公开性做任何拦截，也不再请求 `/repos/{owner}/{repo}` 预检。
 
-- 公开仓库：正常 302 跳转到 Azure 下载域并流式返回。
-- 私有仓库、或仓库不存在、或查询失败（额度耗尽、网络错误）：返回 `403` 与 `Only public repositories can be downloaded through this proxy.`。
-- 判定结果按 `CONFIG.ARTIFACT_REPO_TTL`（86400 秒）写边缘缓存。仓库由公开转为私有后，最长要等这么久才会被拒绝，介意的话把这个值调小。
-- 调用方**自带 `Authorization`** 时不做这项检查，能不能下载由调用方 Token 自己的权限决定。
+- **谁的身份**：调用方**自带 `Authorization`** 时优先用它，本代理不注入也不拦截，能下什么完全由调用方自己的 Token 决定；没有带时用部署方配置的 `GITHUB_TOKEN`。
+- **能下什么**：完全由该 Token 的「仓库访问范围 + `Actions: Read` 权限」决定，Worker 不做可见性判断。公开仓库照常能下，私有仓库只要有权限也照样能下，没有任何额外限制。
+- **文件字节是否经过本代理，取决于上游把下载指向哪个域**：这一跳由本代理的跟随白名单（`SAFE_REDIRECT_HOSTS` 与 `*.blob.core.windows.net` 等 Azure 下载域）决定。跳转目标在白名单内时，本代理跟随过去并把文件流式转发给你；不在白名单内时，本代理把上游那个 `302` 原样交还浏览器，由浏览器直接向 GitHub 的下载域取文件——这种情况下文件字节不经过本代理，本代理只负责给出地址。
+- **权限不足时**：上游通常返回 `404`（GitHub 对无权访问的私有仓库返回 404，避免泄漏仓库是否存在），个别情况返回 `403`，artifact 过期也是 404。本代理保留原始状态码，只把响应体换成一句可读提示，说明「需要 Token 具备该仓库的 Actions 读取权限」，并指向本节；不会改写成 200，也不写入边缘缓存。
+- **风险**：部署方 Token 能访问的私有仓库 artifact，对所有知道这个 Worker 域名的人都是开放的。请把 Token 范围压到最小——只要公开仓库就选 `Public Repositories`，要放行私有仓库就选 `Only select repositories` 逐一勾选。
 
 其他说明：
 
-- 想整体关掉这个能力，把 `CONFIG.ARTIFACT_DOWNLOAD_ENABLED` 设为 `false`。
+- 想整体关掉这个能力，把 `CONFIG.ARTIFACT_DOWNLOAD_ENABLED` 设为 `false`：artifact zip 请求直接返回 `403`，不转发上游。
 - artifact 下载响应标 `BYPASS-API` + `no-store`，不进边缘缓存，不会被匿名请求复用。
-- 超过 32 MB 的 artifact 按大文件策略直通，标 `STREAM-LARGE`。
+- 32 MB 大文件策略（`CONFIG.CACHE_MAX_SIZE` / `CONFIG.LARGE_CACHE_TTL`，超过阈值的响应标 `STREAM-LARGE`）**只作用于非 `api.github.com` 的静态下载路径**，例如 Releases 附件、Archive 包、raw 文件。artifact zip 的请求恒为 `api.github.com`，在 API 分支就已返回，标记是 `BYPASS-API`，**不会**出现 `STREAM-LARGE`，所以 32 MB 这个阈值不影响 artifact 的下载行为。
 - 重定向到 `*.blob.core.windows.net` 的下载链接只在 query 里带 SAS 签名，**不带** `Authorization`。该头在跟随 302 时会重新按目标域名剥离，不会随重定向泄漏给 Azure 或其他下载域。
 
 ## 缓存与限流

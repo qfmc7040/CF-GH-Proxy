@@ -26,11 +26,10 @@ const CONFIG = {
     API_CACHE_TTL: 60,
     // 超过 CACHE_MAX_SIZE 的大文件不写边缘缓存，但让浏览器自己存一份。
     LARGE_CACHE_TTL: 86400,
-    // Actions Artifacts 下载：部署方 PAT 具备 Actions: read 时才真正可用。
-    // 策略是"仅公开仓库"——私有仓库的构建产物绝不经由本代理外泄。
+    // Actions Artifacts 下载总开关：设为 false 时 artifact zip 请求直接 403，不转发上游。
+    // 保持 true（默认）时本代理不做仓库可见性判断：能下载哪些仓库完全由部署方
+    // GITHUB_TOKEN 的仓库访问范围与 Actions 读权限决定，权限不足由上游返回 403/404。
     ARTIFACT_DOWNLOAD_ENABLED: true,
-    // 公开性判定的边缘缓存时长。仓库由公开转私有后，最长要等这么久才失效。
-    ARTIFACT_REPO_TTL: 86400,
 }
 
 const GITHUB_PATTERNS = [
@@ -429,16 +428,17 @@ async function proxyRequest(e, req, pathname) {
         // 调用方自带的 Authorization 始终优先，也不借用部署方 Token。
         const callerToken = reqHdrNew.get('authorization')
 
-        // Actions Artifacts 下载：用了部署方 Token 时只放行公开仓库。
-        // 调用方自带 Token 时由调用方自己的权限决定，不做拦截。
+        // Actions Artifacts 下载总开关：关掉时直接拒绝，不转发上游、不写缓存。
+        // 打开时不做仓库可见性判断——私有仓库能否下载只取决于部署方 Token 的权限。
         const artifactTarget = artifactDownloadTarget(urlObj)
-        if (artifactTarget && !callerToken && CONFIG.ARTIFACT_DOWNLOAD_ENABLED !== false) {
-            if (!(await isPublicRepo(artifactTarget.owner, artifactTarget.repo, e))) {
-                return makeRes(JSON.stringify({
-                    error: 'Forbidden',
-                    message: 'Only public repositories can be downloaded through this proxy.',
-                }), 403, { 'content-type': 'application/json; charset=utf-8' })
-            }
+        if (artifactTarget && CONFIG.ARTIFACT_DOWNLOAD_ENABLED === false) {
+            return makeRes(JSON.stringify({
+                error: 'Forbidden',
+                message: 'Artifact downloads are disabled on this proxy. Set CONFIG.ARTIFACT_DOWNLOAD_ENABLED to true to enable them.',
+            }), 403, {
+                'content-type': 'application/json; charset=utf-8',
+                'cache-control': 'no-store',
+            })
         }
 
         if (isApiTarget) {
@@ -454,6 +454,9 @@ async function proxyRequest(e, req, pathname) {
             reqHdrNew.set('range', rangeHeader)
         }
 
+        // trail 用来拿最后一跳的 URL：只有 api.github.com 自己给出的 403/404 才可能是
+        // Token 权限问题，Azure 下载域的错误属于签名失效之类，不能套这段文案。
+        const trail = {}
         const response = await handleProxyFetch(urlObj, {
             method: req.method, 
             headers: reqHdrNew, 
@@ -463,7 +466,8 @@ async function proxyRequest(e, req, pathname) {
                 cacheEverything: false,
                 cacheTtlByStatus: { "200-299": CONFIG.CACHE_TTL } 
             }
-        }, 0)
+        }, 0, trail)
+        const finalUrl = trail.finalUrl
 
         // handleProxyFetch 内部已递归跟随安全重定向（见 handleProxyFetch），
         // 只有非安全目标才会以 3xx 返回，因此这里不再重复处理重定向。
@@ -472,8 +476,8 @@ async function proxyRequest(e, req, pathname) {
             apiHeaders.delete('set-cookie')
 
             if (apiCacheable && response.ok && response.body) {
-                // 只缓存部署方 Token 取到的公开数据；命中分支会用当前请求的 Origin
-                // 重写 CORS 头，所以存进去的副本去掉 allow-origin 与 vary。
+                // 只缓存用部署方 Token 取到的列表数据（能取到哪些仓库由该 Token 的权限决定）；
+                // 命中分支会用当前请求的 Origin 重写 CORS 头，所以存进去的副本去掉 allow-origin 与 vary。
                 const cacheHeaders = new Headers(apiHeaders)
                 cacheHeaders.delete('access-control-allow-origin')
                 cacheHeaders.delete('vary')
@@ -494,6 +498,51 @@ async function proxyRequest(e, req, pathname) {
                 } catch (teeErr) {
                     console.warn('API tee failed:', teeErr)
                 }
+            }
+
+            // artifact 下载的 403/404 多半是 Token 权限不足（GitHub 对无权访问的私有仓库
+            // 返回 404，避免泄漏存在性）。状态码原样透传，只在响应体里补一句可读提示；
+            // 三个前提缺一不可：
+            //   1. 最终响应确实来自 api.github.com —— 下载产物会 302 到 Azure Blob，
+            //      那里的 403（签名过期等）不是权限问题，不能套这段文案；
+            //   2. 不是限流 —— 一级限流带 x-ratelimit-remaining: 0，二级限流带 retry-after，
+            //      两种情况都保持上游原样；
+            //   3. 调用方没自带 Token —— 否则判定用的是调用方自己的凭据，轮不到我们解释。
+            const rateLimited = response.headers.get('retry-after') !== null ||
+                response.headers.get('x-ratelimit-remaining') === '0'
+            const fromGithubApi = !!finalUrl && finalUrl.hostname === 'api.github.com'
+            if (artifactTarget && !callerToken && fromGithubApi && !rateLimited &&
+                (response.status === 403 || response.status === 404)) {
+                let upstream = ''
+                let upstreamType = ''
+                try {
+                    upstreamType = response.headers.get('content-type') || ''
+                    upstream = await response.text()
+                } catch (e) { /* 读不到就只给提示 */ }
+                const deniedHeaders = new Headers(response.headers)
+                deniedHeaders.delete('content-encoding')
+                deniedHeaders.delete('content-length')
+                deniedHeaders.set('content-type', 'application/json; charset=utf-8')
+                deniedHeaders.set('x-cache-status', 'BYPASS-API')
+                deniedHeaders.set('cache-control', 'no-store')
+                applyCommonHeaders(deniedHeaders)
+                for (const [k, v] of Object.entries(dynamicCors)) deniedHeaders.set(k, v)
+                // 本代理可能压根没配 Token（匿名访问），所以文案要按 serverGithubToken()
+                // 的实际情况分两种，不能一口咬定是「部署方 Token 权限不足」。
+                const tokenHint = serverGithubToken()
+                    ? 'The GITHUB_TOKEN configured on this proxy has no access to this repository. ' +
+                      "Check that token's Repository access and Actions: Read-only permission (see README)."
+                    : 'This proxy has no GITHUB_TOKEN configured, so the request reached GitHub anonymously. ' +
+                      'Anonymous access only covers public repositories. Configure a token with the needed ' +
+                      'Repository access and Actions: Read-only permission (see README).'
+                const deniedBody = {
+                    error: response.status === 404 ? 'Not Found' : 'Forbidden',
+                    message: 'GitHub rejected this artifact download, or the artifact no longer exists. ' + tokenHint,
+                }
+                // 只回显上游 JSON 片段：XML/HTML（例如 Azure 的错误页）塞进 JSON 对调用方
+                // 没有价值，还容易把下载域的问题误读成权限问题。
+                if (upstreamType.includes('json')) deniedBody.upstream = upstream.slice(0, 300)
+                return new Response(JSON.stringify(deniedBody), { status: response.status, headers: deniedHeaders })
             }
 
             apiHeaders.set('x-cache-status', 'BYPASS-API')
@@ -661,7 +710,8 @@ function artifactPageDownloadUrl(path) {
 }
 
 // Actions Artifacts 下载路径：/repos/{owner}/{repo}/actions/artifacts/{id}/zip
-// 只有这个形状的请求才需要做"是否公开仓库"的判定，其余 API 路径不受影响。
+// 纯路径识别，不做任何可见性判定：只用来挂 ARTIFACT_DOWNLOAD_ENABLED 总开关、
+// 以及给权限不足的拒绝响应补可读提示。能否下载由上游按 Token 权限决定。
 function artifactDownloadTarget(urlObj) {
     try {
         if (urlObj.hostname.toLowerCase() !== 'api.github.com') return null
@@ -670,46 +720,6 @@ function artifactDownloadTarget(urlObj) {
         return { owner: decodeURIComponent(m[1]), repo: decodeURIComponent(m[2]) }
     } catch {
         return null
-    }
-}
-
-// 仅公开仓库：部署方 PAT 一旦带 Actions 读权限，私有仓库的 artifact 会变成
-// 任何访客都能下载的公开链接，所以下载前先确认仓库是公开的。
-// 判定结果按 TTL 缓存；查不到（404 / 额度耗尽 / 网络错误）一律按不可用处理。
-async function isPublicRepo(owner, repo, event) {
-    const cache = caches.default
-    const cacheKey = new Request(
-        `https://cache.internal/repo-visibility/${owner.toLowerCase()}/${repo.toLowerCase()}`,
-        { method: 'GET' }
-    )
-    try {
-        const cached = await cache.match(cacheKey)
-        if (cached) return (await cached.text()) === 'public'
-    } catch (e) { /* 缓存读失败就回源 */ }
-
-    try {
-        const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
-        const headers = new Headers({
-            'accept': 'application/vnd.github+json',
-            'user-agent': 'CF-GH-Proxy',
-        })
-        const serverToken = serverGithubToken()
-        if (serverToken) headers.set('authorization', 'Bearer ' + serverToken)
-
-        const res = await fetch(apiUrl, { headers })
-        if (!res.ok) return false
-
-        const data = await res.json()
-        const isPublic = !!data && data.private === false
-
-        event.waitUntil(cache.put(cacheKey, new Response(isPublic ? 'public' : 'private', {
-            headers: { 'cache-control': `public, max-age=${CONFIG.ARTIFACT_REPO_TTL}` },
-        })).catch(err => console.warn('Repo visibility cache failed:', err)))
-
-        return isPublic
-    } catch (err) {
-        console.warn('Repo visibility check failed:', err)
-        return false
     }
 }
 
@@ -739,10 +749,15 @@ function headersForTarget(urlObj, init) {
     return { ...init, headers }
 }
 
-async function handleProxyFetch(urlObj, init, redirectCount) {
+// trail 是可选的回传容器（调用方传 {} 进来）：每次真正发请求前把当前跳的 URL 写进
+// trail.finalUrl，跟随重定向时原样透传。调用方据此判断「这个响应是不是 GitHub API
+// 自己给的」，避免把 Azure Blob 下载域的 403/404 误读成 Token 权限问题。
+// 老调用点不传 trail 也照常工作，只是拿不到 finalUrl。
+async function handleProxyFetch(urlObj, init, redirectCount, trail) {
     if (redirectCount > 5) return makeRes('Too many redirects', 508)
     
     try {
+        if (trail) trail.finalUrl = urlObj
         const res = await fetch(urlObj.href, headersForTarget(urlObj, init))
         
         if ([301, 302, 303, 307, 308].includes(res.status)) {
@@ -756,7 +771,7 @@ async function handleProxyFetch(urlObj, init, redirectCount) {
                            isSafeAzureRedirect(nextUrl.hostname)
             
             if (isSafe) {
-                return handleProxyFetch(nextUrl, init, redirectCount + 1)
+                return handleProxyFetch(nextUrl, init, redirectCount + 1, trail)
             }
             
             const safeHeaders = new Headers(res.headers)
@@ -1037,7 +1052,8 @@ function releaseModeClient() {
 
     function deniedText() {
         return 'GitHub 拒绝了这次请求（HTTP 403）。' +
-            '常见原因：触发了二级限流、仓库已被禁用，或该仓库不允许匿名访问。';
+            '常见原因：触发了二级限流、仓库已被禁用、该仓库不允许匿名访问，' +
+            '或部署方 GITHUB_TOKEN 没有这个仓库的读取权限（见 README 的 Token 配置）。';
     }
 
     function errorTextFor(status, res, bodyText) {
