@@ -19,9 +19,11 @@
 
 1. 在 GitHub 建一个 Token：Settings → Developer settings → [Personal access tokens](https://github.com/settings/personal-access-tokens)。
    - **Classic token**（`Generate new token (classic)`）：一个 scope 都不用勾。不勾 scope 的 token 只能读公开数据，正好够本代理用。
-   - **Fine-grained token**：Repository access 勾选 `Public Repositories`。
+   - **Fine-grained token**：Repository access 勾选 `Public Repositories`（即可访问所有公开仓库，可下载公开仓库的Artifacts）。
+   ![Fine-grained personal access tokens](image/Fine-grained%20personal%20access%20tokens.png)
+   - 如果还要支持私有仓库的 Actions Artifacts 下载，Repository access需要勾选`All repositories`（可访问所有私有仓库）/`Only select repositories`（仅增加选中的私有仓库的访问权限），权限给 `Permissions` → `Repositories` → Add permissions `Actions: Read-only`，如需下载私有仓库release另增 `Contents: Read-only`
 
-![Fine-grained personal access tokens](image/Fine-grained%20personal%20access%20tokens.png)
+
 
 2. 在 Cloudflare 控制台 → Workers & Pages → 选中这个 Worker → Settings → Variables and Secrets → Add。Type 选 **Secret**，Variable name 填 `GITHUB_TOKEN`，Value 填 Token。
 
@@ -62,11 +64,6 @@
 ```
 
 跳转只换地址，不放宽校验：落地的 API zip 请求仍要过下面的「只放行公开仓库」检查。
-
-**需要的权限**：下载 artifact 走的是 `api.github.com`，但所需的 token 权限比读 Releases 更高。
-
-- Classic token：勾 `repo` scope（不勾的话只能读公开数据，但 artifact 接口仍会拒绝）。
-- Fine-grained token：保持仅勾选 `Personal access tokens`
 
 **只放行公开仓库**：`GITHUB_TOKEN` 一旦具备 Actions 读权限，私有仓库的构建产物就会变成「任何拿到本代理域名的人都能下载」。因此用部署方 Token 下载 artifact 时，会先请求 `/repos/{owner}/{repo}` 确认 `private === false`：
 
