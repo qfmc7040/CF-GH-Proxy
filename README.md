@@ -19,8 +19,7 @@
 
 1. 在 GitHub 建一个 Token：Settings → Developer settings → [Personal access tokens](https://github.com/settings/personal-access-tokens)。
    - **Classic token**（`Generate new token (classic)`）：一个 scope 都不用勾。不勾 scope 的 token 只能读公开数据，正好够本代理用。
-   - **Fine-grained token**：Repository access 选 `Public Repositories (read-only)`；只想授权单个仓库就选 `Only select repositories`，并把 `Contents` 设为 `Read-only`（Releases 属于 Contents）。
-   - 如果还要支持 Actions Artifacts 下载，权限需要再加一层，见[Actions Artifacts 下载](https://github.com/qfmc7040/CF-GH-Proxy/blob/main/README.md#actions-artifacts-%E4%B8%8B%E8%BD%BD)。
+   - **Fine-grained token**：Repository access 勾选 `Public Repositories`。
 
 ![Fine-grained personal access tokens](image/Fine-grained%20personal%20access%20tokens.png)
 
@@ -67,7 +66,7 @@
 **需要的权限**：下载 artifact 走的是 `api.github.com`，但所需的 token 权限比读 Releases 更高。
 
 - Classic token：勾 `repo` scope（不勾的话只能读公开数据，但 artifact 接口仍会拒绝）。
-- Fine-grained token：在 `Contents: Read-only` 之外，再加 `Actions: Read-only`。
+- Fine-grained token：保持仅勾选 `Personal access tokens`
 
 **只放行公开仓库**：`GITHUB_TOKEN` 一旦具备 Actions 读权限，私有仓库的构建产物就会变成「任何拿到本代理域名的人都能下载」。因此用部署方 Token 下载 artifact 时，会先请求 `/repos/{owner}/{repo}` 确认 `private === false`：
 
